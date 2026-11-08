@@ -95,7 +95,8 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Frame
     let (w, h) = (cfg.width.max(64), cfg.height.max(64));
     let two = std::env::var("SEEMYMAC_DEMO_DISPLAYS").as_deref() == Ok("2");
     let hp_two = cfg.host.starts_with("two-displays");
-    let mut dual = false;
+    // Connecting straight onto two virtual displays, as the real session does.
+    let mut dual = cfg.virtual_display && hp_two && fb2.is_some();
     let _ = events.send(Event::Stage("Starting the synthetic Apple High Performance source…".into()));
     let mut base = vec![0u8; (w * h * 4) as usize];
     for (i, px) in base.chunks_exact_mut(4).enumerate() {

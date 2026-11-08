@@ -113,7 +113,7 @@ impl App {
                             .flex()
                             .flex_col()
                             .child(div().truncate().child(c.display_name().to_string()))
-                            .child(div().truncate().text_size(px(12.0)).text_color(rgb(MUTED)).child(format!("{} · {}:{} · {}{}", c.proto.label(), c.host, c.port_number(), c.group, if c.user.is_empty() { String::new() } else { format!(" · {}", c.user) }))),
+                            .child(div().truncate().text_size(px(12.0)).text_color(rgb(MUTED)).child(format!("{} · {}:{}{}", c.proto.label(), c.host, c.port_number(), if c.user.is_empty() { String::new() } else { format!(" · {}", c.user) }))),
                     )
                     .when(open, |d| d.child(div().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).bg(rgb(SELECTED)).border_1().border_color(rgb(BORDER)).text_size(px(11.0)).child("Open")))
                     .child(small_btn(("mconn", i), "Connect", TEXT).on_click(cx.listener(move |this, _, window, cx| this.open_connection(&cid, window, cx))))

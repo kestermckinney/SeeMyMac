@@ -116,3 +116,13 @@ cargo build --release
 # Run UI driver directly
 cargo run --bin ui_driver click 740 280
 ```
+
+## Future Plans
+
+The VNC client currently targets macOS Screen Sharing. Planned work to make it a general VNC client:
+
+- **More login methods:** VeNCrypt/TLS (security type 19), Tight (16) and MS-Logon, so TightVNC, UltraVNC, TigerVNC and RealVNC servers can be used. Today only None, VNC password and Apple Diffie-Hellman are supported.
+- **More encodings:** Tight, Hextile and RRE, plus the Cursor pseudo-encoding. Today only ZRLE, Raw, CopyRect and DesktopSize/ExtendedDesktopSize are handled.
+- **Extension messages:** tolerate or implement unknown server messages (such as fence) instead of dropping the connection.
+- **Form options for VNC:** make color depth, resolution and local resources take effect, or hide them where they do not apply.
+- **Tunnelling:** an SSH tunnel or gateway host option for reaching VNC servers behind a jump host.

@@ -153,17 +153,17 @@ impl StartIn {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MultiMonitor {
+    /// "PrimaryOnly" (a removed choice) in older files also means this.
+    #[serde(alias = "PrimaryOnly")]
     OneAtATime,
     SideBySide,
-    PrimaryOnly,
 }
 impl MultiMonitor {
-    pub const ALL: [MultiMonitor; 3] = [Self::OneAtATime, Self::SideBySide, Self::PrimaryOnly];
+    pub const ALL: [MultiMonitor; 2] = [Self::OneAtATime, Self::SideBySide];
     pub fn label(self) -> &'static str {
         match self {
             Self::OneAtATime => "One at a time",
             Self::SideBySide => "All side by side",
-            Self::PrimaryOnly => "Primary only",
         }
     }
 }
@@ -205,7 +205,6 @@ pub struct Connection {
     pub group: String,
     pub fav: bool,
     pub monitors: u32,
-    pub gateway: String,
     pub credentials: CredentialMode,
     pub reconnect: bool,
     pub resolution: Resolution,
@@ -243,7 +242,6 @@ impl Connection {
             group: GROUPS[0].into(),
             fav: true,
             monitors: 1,
-            gateway: String::new(),
             credentials: CredentialMode::Ask,
             reconnect: true,
             resolution: Resolution::MatchWindow,

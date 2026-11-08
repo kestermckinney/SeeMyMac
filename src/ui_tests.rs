@@ -536,12 +536,7 @@ fn apple_hp_two_virtual_displays_are_live_monitors(cx: &mut TestAppContext) {
     tick_until(cx, &view, "HP picture", |a| a.sessions["hp2"].status == Status::Connected && !a.sessions["hp2"].tiles.is_empty());
     std::env::remove_var("SEEMYMAC_DEMO");
     view.update(cx, |a, _| a.st.pinned = true);
-    // On the Mac's own screens: one monitor; the physical layout is remembered for VNC.
-    assert_eq!(view.read_with(cx, |a, _| a.sessions["hp2"].monitors), 1);
-    assert_eq!(view.read_with(cx, |a, _| a.store.get("hp2").unwrap().display_layout.clone()), vec![[0, 0, 1280, 720], [1280, 0, 1280, 720]]);
-
-    // Two virtual displays: two live monitors.
-    cx.simulate_keystrokes("ctrl-alt-v");
+    // Connected straight onto two virtual displays: two live monitors.
     tick_until(cx, &view, "two monitors", |a| a.sessions["hp2"].monitors == 2);
     let green = |a: &App| a.sessions["hp2"].tiles.first().and_then(|t| t.image.as_bytes(0).map(|b| b[1] == 255)).unwrap_or(false);
     cx.simulate_keystrokes("ctrl-alt-pagedown");
@@ -580,10 +575,10 @@ fn apple_hp_one_virtual_display_is_one_monitor(cx: &mut TestAppContext) {
     cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("hp3", window, cx)));
 }
 
-/// A virtual-display Apple HP session starts on the Mac's own screen with a banner
-/// offering the switch; switching clears it (the demo source ignores the command).
+/// A virtual-display Apple HP session connects straight onto the virtual display:
+/// no banner and nothing pending.
 #[gpui::test]
-fn apple_hp_virtual_display_is_offered_after_login(cx: &mut TestAppContext) {
+fn apple_hp_virtual_display_is_used_from_the_start(cx: &mut TestAppContext) {
     std::env::set_var("SEEMYMAC_DEMO", "1");
     let mut store = Store::load(None);
     let mut c = Connection::blank("hpv".into());
@@ -595,11 +590,9 @@ fn apple_hp_virtual_display_is_offered_after_login(cx: &mut TestAppContext) {
     open_and_login(cx, &view, "hpv");
     tick_until(cx, &view, "HP frame", |a| a.sessions["hpv"].status == Status::Connected && !a.sessions["hpv"].tiles.is_empty());
     std::env::remove_var("SEEMYMAC_DEMO");
-    assert!(view.read_with(cx, |a, _| a.sessions["hpv"].virtual_pending.is_some()), "starts on the Mac's own screen");
+    assert!(view.read_with(cx, |a, _| a.sessions["hpv"].virtual_pending.is_none() && a.sessions["hpv"].on_virtual));
     draw(cx);
-    assert!(cx.debug_bounds("virtual-banner").is_some(), "the banner offers the switch");
-    cx.simulate_keystrokes("ctrl-alt-v");
-    assert!(view.read_with(cx, |a, _| a.sessions["hpv"].virtual_pending.is_none()), "Ctrl+Alt+V switches");
+    assert!(cx.debug_bounds("virtual-banner").is_none(), "no banner: already on the virtual display");
     // A VNC session never offers it.
     let (port, _rx) = fake_mac(32, 18, false);
     view.update(cx, |a, _| {

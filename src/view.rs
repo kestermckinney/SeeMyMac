@@ -868,8 +868,6 @@ impl App {
                     .when(d.credentials == CredentialMode::Vault, |col| {
                         col.child(row("Password", self.text_field("f-pass", Field::Password, &form.password, if form.has_saved_password { "Saved. Type to replace it" } else { "Stored in the system keyring" }, true, cx).into_any_element()))
                     })
-                    .child(row("Group", self.cycle("f-group", &GROUPS, GROUPS.iter().copied().find(|g| *g == d.group).unwrap_or(GROUPS[0]), |g| g, |c, v| c.group = v.to_string(), cx).into_any_element()))
-                    .child(row("Gateway (optional)", self.text_field("f-gw", Field::Gateway, &d.gateway, "[GATEWAY HOST]", false, cx).into_any_element()))
                     .child(self.check("c-reconnect", "Reconnect automatically if dropped", d.reconnect, |c, v| c.reconnect = v, cx))
                     .into_any_element()
             }
@@ -882,7 +880,7 @@ impl App {
                 .child(row("Start in", self.cycle("d-start", &StartIn::ALL, d.start_in, StartIn::label, |c, v| c.start_in = v, cx).into_any_element()))
                 .child(row("When the remote PC has more monitors than this PC", self.cycle("d-multi", &MultiMonitor::ALL, d.multi_monitor, MultiMonitor::label, |c, v| c.multi_monitor = v, cx).into_any_element()))
                 .when(d.proto == Proto::Apple, |col| {
-                    col.child(self.check("d-virtual", "Offer a virtual display after login (blanks the Mac's own screens)", d.virtual_display, |c, v| c.virtual_display = v, cx))
+                    col.child(self.check("d-virtual", "Use virtual display (blanks the Mac's own screens)", d.virtual_display, |c, v| c.virtual_display = v, cx))
                         .when(d.virtual_display, |col| {
                             col.child(row("Virtual displays", self.cycle("d-virtual-count", &[1u8, 2], d.virtual_displays.clamp(1, 2), |n| if n == 2 { "2 (shown as monitors 1 and 2)" } else { "1" }, |c, v| c.virtual_displays = v, cx).into_any_element()))
                         })

@@ -96,7 +96,6 @@ pub enum Field {
     Host,
     Port,
     User,
-    Gateway,
     Password,
     Manage,
     PwUser,
@@ -380,12 +379,12 @@ impl App {
                         if aw >= 640 && ah >= 360 { (aw & !1, ah & !1) } else { (1920, 1080) }
                     }
                 };
-                // Start on the Mac's own screen: if it is locked, the login window is
-                // only drawn there. "Use virtual display" then moves this session.
-                s.virtual_pending = conn.virtual_display.then_some((w, h));
+                // When a virtual display is chosen, connect straight onto it.
+                s.virtual_pending = None;
                 s.virtual_size = (w, h);
                 s.virtual_offered = conn.virtual_display;
-                hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: false, virtual_displays: conn.virtual_displays.clamp(1, 2) as u32, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
+                s.on_virtual = conn.virtual_display;
+                hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: conn.virtual_display, virtual_displays: conn.virtual_displays.clamp(1, 2) as u32, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
             }
             _ => rfb::connect(rfb::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone() }),
         };
@@ -954,7 +953,6 @@ impl App {
             Field::Host => self.form.as_mut().map(|f| &mut f.draft.host),
             Field::Port => self.form.as_mut().map(|f| &mut f.draft.port),
             Field::User => self.form.as_mut().map(|f| &mut f.draft.user),
-            Field::Gateway => self.form.as_mut().map(|f| &mut f.draft.gateway),
             Field::Password => self.form.as_mut().map(|f| &mut f.password),
             Field::Manage => Some(&mut self.manage_query),
             Field::None => None,
@@ -968,7 +966,6 @@ impl App {
                 if self.form.as_ref().map_or(false, |f| f.draft.credentials == model::CredentialMode::Vault) {
                     v.push(Field::Password);
                 }
-                v.push(Field::Gateway);
                 v
             }
             View::Password => vec![Field::PwUser, Field::PwPass],
