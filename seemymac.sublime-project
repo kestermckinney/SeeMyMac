@@ -16,15 +16,14 @@
 			"file_regex": "^\\s*--> (..[^:]*):([0-9]+):?([0-9]+)?",
 			"shell_cmd": "cargo build --bin see_my_mac",
 			"variants": [
+				{ "name": "Build Debug", "shell_cmd": "cargo build --bin see_my_mac" },
 				{ "name": "Build Release", "shell_cmd": "cargo build --release --bin see_my_mac" },
+				{ "name": "Build & Run Debug", "shell_cmd": "cargo run --bin see_my_mac" },
+				{ "name": "Build & Run Release", "shell_cmd": "cargo run --release --bin see_my_mac" },
 				{ "name": "Check", "shell_cmd": "cargo check --all-targets" },
 				{ "name": "Test", "shell_cmd": "cargo test" },
 				{ "name": "Clippy", "shell_cmd": "cargo clippy --all-targets" },
 				{ "name": "Clean", "shell_cmd": "cargo clean" },
-				{ "name": "Run Debug", "shell_cmd": "cargo run --bin see_my_mac" },
-				{ "name": "Run Release", "shell_cmd": "cargo run --release --bin see_my_mac" },
-				{ "name": "Build & Run Debug", "shell_cmd": "cargo build --bin see_my_mac && cargo run --bin see_my_mac" },
-				{ "name": "Build & Run Release", "shell_cmd": "cargo build --release --bin see_my_mac && cargo run --release --bin see_my_mac" },
 				{ "name": "Build UI Driver", "shell_cmd": "cargo build --bin ui_driver" }
 			]
 		}
