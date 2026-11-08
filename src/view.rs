@@ -1,0 +1,1028 @@
+//! Rendering, following the layout and tokens in ui_design/README.md.
+
+use crate::app::{App, DialogTab, Field, Status};
+use crate::geometry;
+use crate::model::*;
+use crate::state::{Mon, View};
+use gpui::prelude::*;
+use gpui::*;
+
+// Visual tokens (design §9).
+pub(crate) const BG_CHROME: u32 = 0x0D1117;
+pub(crate) const BG_TITLE: u32 = 0x010409;
+pub(crate) const SURFACE: u32 = 0x161B22;
+pub(crate) const SELECTED: u32 = 0x1F2630;
+pub(crate) const BORDER: u32 = 0x30363D;
+pub(crate) const DIVIDER: u32 = 0x262C36;
+pub(crate) const TEXT: u32 = 0xE6EDF3;
+pub(crate) const MUTED: u32 = 0x9198A1;
+pub(crate) const ACCENT: u32 = 0x2F6FEB;
+pub(crate) const ACCENT_DARK: u32 = 0x6CA4FF;
+pub(crate) const OK: u32 = 0x3FB950;
+pub(crate) const WARN: u32 = 0xD29922;
+pub(crate) const DANGER: u32 = 0xF47067;
+
+pub(crate) const TITLE_H: f32 = 32.0;
+pub(crate) const TOOLBAR_H: f32 = 40.0;
+pub(crate) const PULL_H: f32 = 24.0;
+
+fn status_color(s: &Status) -> u32 {
+    match s {
+        Status::Connected => OK,
+        Status::Connecting | Status::Reconnecting => WARN,
+        Status::Failed(_) => DANGER,
+    }
+}
+
+pub(crate) fn dot(color: u32) -> Div {
+    div().size(px(8.0)).rounded_full().bg(rgb(color)).flex_none()
+}
+
+pub(crate) fn tool_btn(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .flex_none()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .text_color(rgb(TEXT))
+        .hover(|s| s.bg(rgb(SELECTED)))
+        .child(label.into())
+}
+
+pub(crate) fn primary_btn(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(14.0))
+        .flex()
+        .items_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .bg(rgb(ACCENT))
+        .text_color(rgb(0xFFFFFF))
+        .font_weight(FontWeight::SEMIBOLD)
+        .hover(|s| s.opacity(0.9))
+        .child(label.into())
+}
+
+pub(crate) fn secondary_btn(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(14.0))
+        .flex()
+        .items_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .text_color(rgb(TEXT))
+        .hover(|s| s.bg(rgb(SELECTED)))
+        .child(label.into())
+}
+
+pub(crate) fn label_text(t: &str) -> Div {
+    div().text_color(rgb(MUTED)).text_size(px(12.0)).child(t.to_string())
+}
+
+pub(crate) fn checkbox_box(on: bool) -> Div {
+    div()
+        .size(px(16.0))
+        .flex_none()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(if on { ACCENT } else { BORDER }))
+        .bg(rgb(if on { ACCENT } else { BG_CHROME }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(11.0))
+        .text_color(rgb(0xFFFFFF))
+        .child(if on { "✓" } else { "" })
+}
+
+impl App {
+    pub(crate) fn text_field(&self, id: &'static str, field: Field, value: &str, placeholder: &str, masked: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let focused = self.field == field;
+        let shown: String = if masked { "•".repeat(value.chars().count()) } else { value.to_string() };
+        div()
+            .id(id)
+            .h(px(32.0))
+            .w_full()
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(6.0))
+            .bg(rgb(BG_CHROME))
+            .border_1()
+            .border_color(rgb(if focused { ACCENT_DARK } else { BORDER }))
+            .cursor_text()
+            .overflow_hidden()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.field = field;
+                window.focus(&this.focus);
+                cx.notify();
+            }))
+            .child(if shown.is_empty() && !focused {
+                div().text_color(rgb(MUTED)).child(placeholder.to_string())
+            } else {
+                div().flex().items_center().child(shown).child(div().w(px(1.0)).h(px(16.0)).ml(px(1.0)).bg(rgb(if focused { ACCENT_DARK } else { BG_CHROME })))
+            })
+    }
+
+    pub(crate) fn cycle<T: Copy + PartialEq + 'static>(
+        id: &'static str,
+        all: &'static [T],
+        current: T,
+        label: impl Fn(T) -> &'static str,
+        apply: impl Fn(&mut Connection, T) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let next = all[(all.iter().position(|x| *x == current).unwrap_or(0) + 1) % all.len()];
+        div()
+            .id(id)
+            .h(px(32.0))
+            .w_full()
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .rounded(px(6.0))
+            .bg(rgb(BG_CHROME))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .cursor_pointer()
+            .hover(|s| s.border_color(rgb(ACCENT_DARK)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(f) = &mut this.form {
+                    apply(&mut f.draft, next);
+                }
+                cx.notify();
+            }))
+            .child(label(current))
+            .child(div().text_color(rgb(MUTED)).child("▾"))
+    }
+
+    pub(crate) fn check(id: &'static str, text: &'static str, on: bool, apply: impl Fn(&mut Connection, bool) + 'static, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(28.0))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(f) = &mut this.form {
+                    apply(&mut f.draft, !on);
+                }
+                cx.notify();
+            }))
+            .child(checkbox_box(on))
+            .child(text)
+    }
+
+    // ----- chrome -----------------------------------------------------------
+
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = match (self.active_conn(), self.st.active.is_some()) {
+            (Some(c), true) => format!("{} — {} — Remote Desktop", c.display_name(), c.host),
+            _ => "SeeMyMac — Remote Desktop".to_string(),
+        };
+        let win_btn = |id: &'static str, glyph: &'static str, danger: bool| {
+            div()
+                .id(id)
+                .w(px(40.0))
+                .h(px(TITLE_H))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(rgb(MUTED))
+                .hover(move |s| if danger { s.bg(rgb(0xC42B1C)).text_color(rgb(0xFFFFFF)) } else { s.bg(rgb(SELECTED)).text_color(rgb(TEXT)) })
+                // Keep the press from reaching the title bar, whose mouse-down starts a
+                // window move: the compositor would take the pointer and the click
+                // would never complete.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .debug_selector(move || id.to_string())
+                .child(glyph)
+        };
+        div()
+            .id("titlebar")
+            .debug_selector(|| "titlebar".into())
+            .h(px(TITLE_H))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(rgb(BG_TITLE))
+            .border_b_1()
+            .border_color(rgb(DIVIDER))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, _| {
+                if ev.click_count >= 2 {
+                    window.zoom_window();
+                } else {
+                    this.window_drags += 1;
+                    window.start_window_move();
+                }
+            }))
+            .child(div().w(px(40.0)).flex().justify_center().child(div().size(px(14.0)).rounded(px(4.0)).bg(rgb(ACCENT))))
+            .child(div().flex_1().truncate().text_color(rgb(MUTED)).text_size(px(12.0)).child(title))
+            .child(win_btn("win-min", "–", false).on_click(cx.listener(|_, _, window, _| window.minimize_window())))
+            .child(win_btn("win-max", "▢", false).on_click(cx.listener(|_, _, window, _| window.zoom_window())))
+            .child(win_btn("win-close", "✕", true).on_click(cx.listener(|this, _, _, cx| this.quit(cx))))
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.st.active.clone();
+        let mut tabs = div().flex().items_center().h_full().min_w_0().overflow_hidden();
+        for (i, id) in self.st.open.iter().enumerate() {
+            let (name, color) = match (self.store.get(id), self.sessions.get(id)) {
+                (Some(c), Some(s)) => (c.display_name().to_string(), status_color(&s.status)),
+                _ => (id.clone(), MUTED),
+            };
+            let is_active = active.as_deref() == Some(id.as_str());
+            let sid = id.clone();
+            let cid = id.clone();
+            tabs = tabs.child(
+                div()
+                    .id(("tab", i))
+                    .h_full()
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(rgb(if is_active { ACCENT_DARK } else { BG_CHROME }))
+                    .bg(rgb(if is_active { SELECTED } else { BG_CHROME }))
+                    .hover(|s| s.bg(rgb(SELECTED)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.st.switch_to(&sid);
+                        window.focus(&this.focus);
+                        cx.notify();
+                    }))
+                    .child(dot(color))
+                    .child(div().max_w(px(160.0)).truncate().child(name))
+                    .child(
+                        div()
+                            .id(("tabx", i))
+                            .size(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .text_color(rgb(MUTED))
+                            .hover(|s| s.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_session(&cid, window, cx);
+                            }))
+                            .child("×"),
+                    ),
+            );
+        }
+
+        let monitors = self.active_session().map_or(1, |s| s.monitors);
+        let cur_mon = active.as_deref().map_or(Mon::One, |a| self.st.monitor(a));
+        let mon_sel = (monitors > 1).then(|| {
+            let seg = |id: &'static str, text: &'static str, m: Mon, cx: &mut Context<Self>| {
+                let sel = cur_mon == m;
+                div()
+                    .id(id)
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .rounded(px(4.0))
+                    .bg(rgb(if sel { ACCENT } else { BG_CHROME }))
+                    .text_color(rgb(if sel { 0xFFFFFF } else { TEXT }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let a = this.st.active.clone();
+                        this.set_monitor(&a, m);
+                        cx.notify();
+                    }))
+                    .child(text)
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .p(px(2.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(seg("mon1", "1", Mon::One, cx))
+                .child(seg("mon2", "2", Mon::Two, cx))
+                .child(seg("monall", "Both", Mon::All, cx))
+        });
+
+        let res = self.active_session().filter(|s| s.size.0 > 0).map_or("—".to_string(), |s| format!("{} × {} · {}", s.size.0, s.size.1, s.scaling.short()));
+
+        div()
+            .id("toolbar")
+            .h(px(TOOLBAR_H))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(4.0))
+            .bg(rgb(BG_CHROME))
+            .border_b_1()
+            .border_color(rgb(DIVIDER))
+            .child(tool_btn("btn-connections", "Connections ▾").on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))))
+            .child(tabs)
+            .child(tool_btn("btn-new", "+").on_click(cx.listener(|this, _, window, cx| this.new_connection_dialog(window, cx))))
+            .child(div().flex_1())
+            .children(mon_sel)
+            .child(div().px(px(8.0)).text_color(rgb(MUTED)).flex_none().child(res))
+            .child(tool_btn("btn-switch", "Switch").on_click(cx.listener(|this, _, window, cx| {
+                this.st.toggle_view(View::Switcher);
+                window.focus(&this.focus);
+                cx.notify();
+            })))
+            .when(self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| {
+                d.child(tool_btn("btn-virtual", "Use virtual display").on_click(cx.listener(|this, _, _, cx| this.use_virtual_display(cx))))
+            })
+            .child(tool_btn("btn-cad", "Ctrl+Alt+Del").on_click(cx.listener(|this, _, _, _| this.send_ctrl_alt_del())))
+            .child(tool_btn("btn-scale", "Scale").on_click(cx.listener(|this, _, _, cx| {
+                this.cycle_scaling();
+                cx.notify();
+            })))
+            .child(tool_btn("btn-pin", "Unpin").on_click(cx.listener(|this, _, _, cx| {
+                this.st.toggle_pin();
+                cx.notify();
+            })))
+            .child(tool_btn("btn-full", if self.st.full { "Exit full screen" } else { "Full screen" }).on_click(cx.listener(|this, _, window, cx| this.toggle_full(window, cx))))
+    }
+
+    /// Shown while an Apple HP session that wants a virtual display is still on the
+    /// Mac's own screen (where a locked Mac shows its login window).
+    fn virtual_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().absolute().bottom(px(16.0)).left_0().right_0().flex().justify_center().child(
+            div()
+                .id("virtual-banner")
+                .debug_selector(|| "virtual-banner".into())
+                .occlude()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(14.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(rgba(0x0D1117E6))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(div().text_size(px(12.0)).child(if self.active_session().map_or(false, |s| s.big_screen) {
+                    "This Mac's 5K screen is slow to show here, so input lags. Log in if it is locked, then switch."
+                } else {
+                    "Showing the Mac's own screen. Log in here if it is locked, then switch."
+                }))
+                .child(primary_btn("banner-virtual", "Use virtual display").on_click(cx.listener(|this, _, _, cx| this.use_virtual_display(cx))))
+                .child(secondary_btn("banner-stay", "Stay on this screen").on_click(cx.listener(|this, _, _, cx| {
+                    let id = this.st.active.clone();
+                    if let Some(s) = id.and_then(|id| this.sessions.get_mut(&id)) {
+                        s.virtual_pending = None;
+                    }
+                    cx.notify();
+                }))),
+        )
+    }
+
+    fn pull_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (name, color, status) = match (self.active_conn(), self.active_session()) {
+            (Some(c), Some(s)) => (c.display_name().to_string(), status_color(&s.status), s.status.label()),
+            _ => ("No sessions".to_string(), MUTED, ""),
+        };
+        let more = self.st.open.len().saturating_sub(1);
+        let mon = self.st.active.as_deref().map(|a| self.st.monitor(a));
+        let monitors = self.active_session().map_or(1, |s| s.monitors);
+        div().absolute().top_0().left_0().right_0().flex().justify_center().child(
+            div()
+                .id("pulltab")
+                .h(px(PULL_H))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded_b(px(6.0))
+                .bg(rgb(BG_CHROME))
+                .border_1()
+                .border_t_0()
+                .border_color(rgb(BORDER))
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .occlude()
+                .hover(|s| s.bg(rgb(SELECTED)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.st.pinned = true;
+                    cx.notify();
+                }))
+                .child(dot(color))
+                .child(name)
+                .child(div().text_color(rgb(MUTED)).child(status))
+                .when(monitors > 1, |d| {
+                    d.child(div().text_color(rgb(MUTED)).child(match mon {
+                        Some(Mon::Two) => "Monitor 2",
+                        Some(Mon::All) => "Both monitors",
+                        _ => "Monitor 1",
+                    }))
+                })
+                .when(more > 0, |d| d.child(div().text_color(rgb(MUTED)).child(format!("+{more} more")))),
+        )
+    }
+
+    // ----- remote area ------------------------------------------------------
+
+    fn remote_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let area = self.area.get();
+        let (aw, ah) = (f32::from(area.size.width), f32::from(area.size.height));
+        let Some(id) = self.st.active.clone() else {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(14.0))
+                .child(div().text_size(px(16.0)).font_weight(FontWeight::MEDIUM).child("No active sessions"))
+                .child(div().text_color(rgb(MUTED)).child("Open a saved connection or create a new one."))
+                .child(primary_btn("open-connections", "Open connections").on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))))
+                .into_any_element();
+        };
+        let mon = self.st.monitor(&id);
+        let Some(s) = self.sessions.get(&id) else { return div().into_any_element() };
+        let host = self.store.get(&id).map(|c| c.host.clone()).unwrap_or_default();
+
+        match &s.status {
+            Status::Connected if !s.tiles.is_empty() => {
+                if mon == Mon::All && s.tiles.len() > 1 {
+                    // Monitors side by side at 16:9 on a dark letterbox, each labelled (§5).
+                    let n = s.tiles.len() as f32;
+                    let tile_w = ((aw - 16.0 - 8.0 * (n - 1.0)) / n).max(1.0);
+                    let mut row = div().size_full().flex().items_center().justify_center().gap(px(8.0)).p(px(8.0)).bg(rgb(BG_TITLE));
+                    for (i, t) in s.tiles.iter().enumerate() {
+                        let zoom = if i == 0 { Mon::One } else { Mon::Two };
+                        let zid = id.clone();
+                        row = row.child(
+                            div()
+                                .id(("tile", i))
+                                .flex_1()
+                                .min_w_0()
+                                .relative()
+                                .cursor_pointer()
+                                .child(div().w_full().h(px(tile_w * 9.0 / 16.0)).bg(rgb(0x000000)).child(img(t.image.clone()).size_full().object_fit(ObjectFit::Contain)))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(8.0))
+                                        .bottom(px(8.0))
+                                        .px(px(8.0))
+                                        .py(px(2.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgba(0x000000B3))
+                                        .text_size(px(12.0))
+                                        .child(format!("Monitor {} · {} × {}", i + 1, t.size.0, t.size.1)),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.st.zoom_into(&zid, zoom);
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    row.into_any_element()
+                } else {
+                    let t = &s.tiles[0];
+                    let r = geometry::image_rect(aw, ah, t.size.0 as f32, t.size.1 as f32, s.scaling);
+                    div()
+                        .size_full()
+                        .relative()
+                        .overflow_hidden()
+                        .bg(rgb(0x000000))
+                        .child(img(t.image.clone()).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill))
+                        .into_any_element()
+                }
+            }
+            Status::Failed(msg) => {
+                let rid = id.clone();
+                let cid = id.clone();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(12.0))
+                    .p(px(24.0))
+                    .child(div().flex().items_center().gap(px(8.0)).child(dot(DANGER)).child(div().font_weight(FontWeight::MEDIUM).child(format!("Could not connect to {host}"))))
+                    .child(div().max_w(px(520.0)).text_color(rgb(MUTED)).child(msg.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(primary_btn("retry", "Try again").on_click(cx.listener(move |this, _, window, cx| {
+                                // Re-prompt for a login when the connection asks for one.
+                                let needs_login = this.sessions.get(&rid).map_or(false, |s| matches!(&s.status, Status::Failed(m) if m.contains("password") || m.contains("authentication")));
+                                if needs_login {
+                                    this.show_password(&rid, None, window, cx);
+                                } else {
+                                    this.retry_session(&rid, cx);
+                                }
+                            })))
+                            .child(secondary_btn("close-failed", "Close").on_click(cx.listener(move |this, _, window, cx| this.close_session(&cid, window, cx)))),
+                    )
+                    .into_any_element()
+            }
+            other => {
+                let reconnecting = *other == Status::Reconnecting;
+                let title = if matches!(other, Status::Connected) {
+                    format!("Waiting for the first screen image from {host}…")
+                } else if reconnecting {
+                    format!("Reconnecting to {host}…")
+                } else {
+                    format!("Connecting to {host}…")
+                };
+                let secs = s.started.elapsed().as_secs();
+                let cid = id.clone();
+                let hint = if secs >= 8 { "Taking a while? Check the address, that Screen Sharing is on, and whether the Mac is asking you to approve the connection." } else { "" };
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.0))
+                    .p(px(24.0))
+                    .child(div().flex().items_center().gap(px(8.0)).child(dot(WARN)).child(div().font_weight(FontWeight::MEDIUM).child(title)).child(div().text_color(rgb(MUTED)).child(format!("{secs}s"))))
+                    .child(div().max_w(px(560.0)).text_color(rgb(MUTED)).child(s.stage.clone()))
+                    .child(div().max_w(px(560.0)).text_color(rgb(MUTED)).child(hint))
+                    .child(secondary_btn("cancel-connect", "Cancel").on_click(cx.listener(move |this, _, window, cx| this.close_session(&cid, window, cx))))
+                    .into_any_element()
+            }
+        }
+    }
+
+    // ----- overlays ---------------------------------------------------------
+
+    fn menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let q = self.quick.clone();
+        let matches = |c: &&Connection| {
+            let ql = q.trim().to_lowercase();
+            ql.is_empty() || c.name.to_lowercase().contains(&ql) || c.host.to_lowercase().contains(&ql)
+        };
+        let favs: Vec<Connection> = self.store.favorites().into_iter().filter(matches).cloned().collect();
+        let recent: Vec<Connection> = self.store.recent().into_iter().filter(matches).cloned().collect();
+
+        let section = |t: String| div().px(px(14.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(MUTED)).child(t);
+        let row_base = |id: ElementId| div().id(id).min_h(px(40.0)).px(px(14.0)).flex().items_center().gap(px(10.0)).cursor_pointer().hover(|s| s.bg(rgb(SELECTED)));
+
+        let mut list = div().flex().flex_col();
+
+        // Active (N)
+        if !self.st.open.is_empty() {
+            list = list.child(section(format!("ACTIVE ({})", self.st.open.len())));
+            for (i, id) in self.st.open.iter().enumerate() {
+                let (Some(c), Some(s)) = (self.store.get(id), self.sessions.get(id)) else { continue };
+                let current = self.st.active.as_deref() == Some(id.as_str());
+                let sid = id.clone();
+                list = list.child(
+                    row_base(ElementId::from(("act", i)))
+                        .bg(rgb(if current { SELECTED } else { SURFACE }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.st.switch_to(&sid);
+                            window.focus(&this.focus);
+                            cx.notify();
+                        }))
+                        .child(dot(status_color(&s.status)))
+                        .child(div().flex_1().truncate().child(c.display_name().to_string()))
+                        .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(s.status.label()))
+                        .when(i < 9, |d| d.child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(format!("Ctrl+Alt+{}", i + 1)))),
+                );
+            }
+        }
+
+        let conn_row = |c: &Connection, idx: usize, prefix: &'static str, icon: &'static str, cx: &mut Context<Self>| {
+            let open = self.st.is_open(&c.id);
+            let (oid, eid) = (c.id.clone(), c.id.clone());
+            row_base(ElementId::from((prefix, idx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_connection(&oid, window, cx)))
+                .child(div().w(px(16.0)).text_color(rgb(if prefix == "fav" { WARN } else { MUTED })).child(icon))
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(c.display_name().to_string())).child(div().truncate().text_size(px(12.0)).text_color(rgb(MUTED)).child(if prefix == "fav" { c.subtitle() } else { c.host.clone() })))
+                .when(open, |d| d.child(div().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).bg(rgb(SELECTED)).border_1().border_color(rgb(BORDER)).text_size(px(11.0)).child("Open")))
+                .child(
+                    div()
+                        .id(ElementId::from((if prefix == "fav" { "fav-edit" } else { "rec-edit" }, idx)))
+                        .size(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .text_color(rgb(MUTED))
+                        .hover(|s| s.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.edit_connection_dialog(&eid, window, cx);
+                        }))
+                        .child("✎"),
+                )
+        };
+
+        if !favs.is_empty() {
+            list = list.child(section("FAVORITES".into()));
+            for (i, c) in favs.iter().enumerate() {
+                list = list.child(conn_row(c, i, "fav", "★", cx));
+            }
+        }
+        if !recent.is_empty() {
+            list = list.child(section("RECENT".into()));
+            for (i, c) in recent.iter().enumerate() {
+                list = list.child(conn_row(c, i, "rec", "◷", cx));
+            }
+        }
+        if favs.is_empty() && recent.is_empty() && self.st.open.is_empty() {
+            list = list.child(div().px(px(14.0)).py(px(12.0)).text_color(rgb(MUTED)).child(if q.trim().is_empty() { "No saved connections yet.".to_string() } else { format!("No match. Press Enter to connect to “{}”.", q.trim()) }));
+        }
+
+        let action = |id: &'static str, text: &'static str, hint: &'static str| {
+            row_base(ElementId::from(id)).child(div().flex_1().child(text)).child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(hint))
+        };
+
+        div()
+            .id("menu")
+            .debug_selector(|| "menu".into())
+            .absolute()
+            .top(px(0.0))
+            .left(px(8.0))
+            .w(px(380.0))
+            .max_h(px((f32::from(self.area.get().size.height) - 16.0).max(200.0)))
+            .flex()
+            .flex_col()
+            .rounded(px(10.0))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .shadow_lg()
+            .occlude()
+            .child(div().p(px(10.0)).child(self.text_field("quick", Field::Quick, &self.quick, "Quick connect: search or enter a host name", false, cx)))
+            .child(div().id("menu-list").flex_1().min_h_0().overflow_y_scroll().child(list))
+            .child(div().h(px(1.0)).bg(rgb(DIVIDER)).mt(px(6.0)))
+            .child(action("act-new", "New connection…", "Ctrl+N").on_click(cx.listener(|this, _, window, cx| this.new_connection_dialog(window, cx))))
+            .child(action("act-manage", "Manage all connections…", "Ctrl+M").on_click(cx.listener(|this, _, window, cx| this.open_manage(window, cx))))
+            .child(action("act-settings", "Settings", "Ctrl+,").on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))))
+    }
+
+    fn switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut cards = div().flex().flex_wrap().justify_center().gap(px(16.0)).p(px(24.0));
+        for (i, id) in self.st.open.iter().enumerate() {
+            let (Some(c), Some(s)) = (self.store.get(id), self.sessions.get(id)) else { continue };
+            let sid = id.clone();
+            let current = self.st.active.as_deref() == Some(id.as_str());
+            cards = cards.child(
+                div()
+                    .id(("card", i))
+                    .w(px(244.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(SURFACE))
+                    .border_2()
+                    .border_color(rgb(if current { ACCENT_DARK } else { BORDER }))
+                    .cursor_pointer()
+                    .overflow_hidden()
+                    .hover(|st| st.border_color(rgb(ACCENT_DARK)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.st.switch_to(&sid);
+                        window.focus(&this.focus);
+                        cx.notify();
+                    }))
+                    .child(div().w_full().h(px(137.0)).bg(rgb(0x000000)).flex().items_center().justify_center().child(match s.tiles.first() {
+                        Some(t) => img(t.image.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                        None => div().text_color(rgb(MUTED)).child(s.status.label()).into_any_element(),
+                    }))
+                    .child(
+                        div()
+                            .p(px(10.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(dot(status_color(&s.status)))
+                            .child(div().flex_1().truncate().child(c.display_name().to_string()))
+                            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(if i < 9 { format!("Ctrl+Alt+{}", i + 1) } else { String::new() })),
+                    ),
+            );
+        }
+        cards = cards.child(
+            div()
+                .id("card-new")
+                .w(px(244.0))
+                .h(px(137.0 + 40.0))
+                .rounded(px(10.0))
+                .border_2()
+                .border_color(rgb(BORDER))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(rgb(MUTED))
+                .hover(|s| s.border_color(rgb(ACCENT_DARK)).text_color(rgb(TEXT)))
+                .on_click(cx.listener(|this, _, window, cx| this.new_connection_dialog(window, cx)))
+                .child("+  New connection"),
+        );
+        div()
+            .id("switcher")
+            .debug_selector(|| "switcher".into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .bg(rgba(0x010409E6))
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx)))
+            .child(div().id("switcher-inner").on_click(|_, _, cx| cx.stop_propagation()).child(cards))
+    }
+
+    fn dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(form) = &self.form else { return div().into_any_element() };
+        let d = &form.draft;
+        let tab_btn = |id: &'static str, text: &'static str, t: DialogTab, cx: &mut Context<Self>| {
+            let sel = form.tab == t;
+            div()
+                .id(id)
+                .px(px(14.0))
+                .h(px(36.0))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .border_b_2()
+                .border_color(rgb(if sel { ACCENT_DARK } else { SURFACE }))
+                .text_color(rgb(if sel { TEXT } else { MUTED }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = &mut this.form {
+                        f.tab = t;
+                    }
+                    cx.notify();
+                }))
+                .child(text)
+        };
+        let row = |label: &str, control: AnyElement| div().flex().items_center().gap(px(12.0)).min_h(px(40.0)).child(div().w(px(190.0)).flex_none().child(label_text(label))).child(div().flex_1().min_w_0().child(control));
+
+        let body: AnyElement = match form.tab {
+            DialogTab::General => {
+                let seg = |p: Proto, cx: &mut Context<Self>| {
+                    let sel = d.proto == p;
+                    div()
+                        .id(SharedString::from(format!("proto-{}", p.label())))
+                        .h(px(26.0))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .rounded(px(4.0))
+                        .bg(rgb(if sel { ACCENT } else { BG_CHROME }))
+                        .text_color(rgb(if sel { 0xFFFFFF } else { TEXT }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_protocol(p);
+                            cx.notify();
+                        }))
+                        .child(p.label())
+                };
+                let mut segs = div().flex().gap(px(2.0)).p(px(2.0)).rounded(px(6.0)).border_1().border_color(rgb(BORDER)).w_auto();
+                for p in Proto::ALL {
+                    segs = segs.child(seg(p, cx));
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(row("Display name", self.text_field("f-name", Field::Name, &d.name, "My Mac", false, cx).into_any_element()))
+                    .child(row("Protocol", div().flex().child(segs).into_any_element()))
+                    .child(row("Host name or IP address", self.text_field("f-host", Field::Host, &d.host, "mac.local or 192.168.1.20", false, cx).into_any_element()))
+                    .child(row("Port", self.text_field("f-port", Field::Port, &d.port, &d.proto.default_port().to_string(), false, cx).into_any_element()))
+                    .child(row("User name", self.text_field("f-user", Field::User, &d.user, "Optional for VNC", false, cx).into_any_element()))
+                    .child(row("Credentials", Self::cycle("f-cred", &CredentialMode::ALL, d.credentials, CredentialMode::label, |c, v| c.credentials = v, cx).into_any_element()))
+                    .when(d.credentials == CredentialMode::Vault, |col| {
+                        col.child(row("Password", self.text_field("f-pass", Field::Password, &form.password, if form.has_saved_password { "Saved. Type to replace it" } else { "Stored in the system keyring" }, true, cx).into_any_element()))
+                    })
+                    .child(row("Group", Self::cycle("f-group", &GROUPS, GROUPS.iter().copied().find(|g| *g == d.group).unwrap_or(GROUPS[0]), |g| g, |c, v| c.group = v.to_string(), cx).into_any_element()))
+                    .child(row("Gateway (optional)", self.text_field("f-gw", Field::Gateway, &d.gateway, "[GATEWAY HOST]", false, cx).into_any_element()))
+                    .child(div().pl(px(202.0)).child(Self::check("c-fav", "Show in Favorites", d.fav, |c, v| c.fav = v, cx)))
+                    .child(div().pl(px(202.0)).child(Self::check("c-reconnect", "Reconnect automatically if dropped", d.reconnect, |c, v| c.reconnect = v, cx)))
+                    .into_any_element()
+            }
+            DialogTab::Display => div()
+                .flex()
+                .flex_col()
+                .child(row("Remote resolution", Self::cycle("d-res", &Resolution::ALL, d.resolution, Resolution::label, |c, v| c.resolution = v, cx).into_any_element()))
+                .child(row("Scaling", Self::cycle("d-scale", &Scaling::ALL, d.scaling, Scaling::label, |c, v| c.scaling = v, cx).into_any_element()))
+                .child(row("Color depth", Self::cycle("d-depth", &ColorDepth::ALL, d.depth, ColorDepth::label, |c, v| c.depth = v, cx).into_any_element()))
+                .child(row("Start in", Self::cycle("d-start", &StartIn::ALL, d.start_in, StartIn::label, |c, v| c.start_in = v, cx).into_any_element()))
+                .child(row("When the remote PC has more monitors than this PC", Self::cycle("d-multi", &MultiMonitor::ALL, d.multi_monitor, MultiMonitor::label, |c, v| c.multi_monitor = v, cx).into_any_element()))
+                .when(d.proto == Proto::Apple, |col| {
+                    col.child(div().pl(px(202.0)).child(Self::check("d-virtual", "Offer a virtual display after login (blanks the Mac's own screens)", d.virtual_display, |c, v| c.virtual_display = v, cx)))
+                })
+                .child(div().pl(px(202.0)).child(Self::check("d-span", "Span all local monitors", d.span_monitors, |c, v| c.span_monitors = v, cx)))
+                .into_any_element(),
+            DialogTab::Local => div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(Self::check("l-clip", "Clipboard", d.local.clipboard, |c, v| c.local.clipboard = v, cx))
+                .child(Self::check("l-drives", "Local drives", d.local.drives, |c, v| c.local.drives = v, cx))
+                .child(Self::check("l-print", "Printers", d.local.printers, |c, v| c.local.printers = v, cx))
+                .child(Self::check("l-audio", "Audio playback", d.local.audio, |c, v| c.local.audio = v, cx))
+                .child(Self::check("l-keys", "Windows key combinations", d.local.key_combinations, |c, v| c.local.key_combinations = v, cx))
+                .child(Self::check("l-smart", "Smart cards", d.local.smart_cards, |c, v| c.local.smart_cards = v, cx))
+                .into_any_element(),
+        };
+
+        div()
+            .id("dialog-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .bg(rgba(0x010409B3))
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx)))
+            .child(
+                div()
+                    .id("dialog")
+                    .debug_selector(|| "dialog".into())
+                    .w(px(640.0))
+                    .max_w_full()
+                    .rounded(px(12.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(div().px(px(20.0)).pt(px(16.0)).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(if form.is_new { "New connection" } else { "Edit connection" }))
+                    .child(div().flex().px(px(12.0)).mt(px(8.0)).border_b_1().border_color(rgb(DIVIDER)).child(tab_btn("t-gen", "General", DialogTab::General, cx)).child(tab_btn("t-disp", "Display", DialogTab::Display, cx)).child(tab_btn("t-local", "Local resources", DialogTab::Local, cx)))
+                    .child(div().px(px(20.0)).py(px(12.0)).min_h(px(400.0)).child(body))
+                    .children(form.error.clone().map(|e| div().px(px(20.0)).pb(px(8.0)).text_color(rgb(DANGER)).child(e)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(20.0))
+                            .py(px(14.0))
+                            .border_t_1()
+                            .border_color(rgb(DIVIDER))
+                            .when(!form.is_new, |d| d.child(div().id("btn-delete").h(px(32.0)).px(px(14.0)).flex().items_center().rounded(px(6.0)).cursor_pointer().text_color(rgb(DANGER)).hover(|s| s.bg(rgb(SELECTED))).on_click(cx.listener(|this, _, window, cx| this.delete_from_form(window, cx))).child("Delete")))
+                            .child(div().flex_1())
+                            .child(secondary_btn("btn-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx))))
+                            .child(secondary_btn("btn-save", "Save").on_click(cx.listener(|this, _, window, cx| this.save_form(false, window, cx))))
+                            .child(primary_btn("btn-save-connect", "Save & connect").on_click(cx.listener(|this, _, window, cx| this.save_form(true, window, cx)))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn password_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(p) = &self.pw else { return div().into_any_element() };
+        let host = self.store.get(&p.conn_id).map(|c| c.display_name().to_string()).unwrap_or_default();
+        div()
+            .id("pw-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .bg(rgba(0x010409B3))
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("pw")
+                    .debug_selector(|| "pw".into())
+                    .w(px(420.0))
+                    .rounded(px(12.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .p(px(20.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(format!("Sign in to {host}")))
+                    .children(p.error.clone().map(|e| div().text_color(rgb(DANGER)).child(e)))
+                    .child(label_text("User name (Apple Screen Sharing needs one)"))
+                    .child(self.text_field("pw-user", Field::PwUser, &p.user, "User name", false, cx))
+                    .child(label_text("Password"))
+                    .child(self.text_field("pw-pass", Field::PwPass, &p.pass, "Password", true, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .mt(px(6.0))
+                            .child(secondary_btn("pw-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.cancel_password(window, cx))))
+                            .child(primary_btn("pw-ok", "Connect").on_click(cx.listener(|this, _, window, cx| this.submit_password(window, cx)))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn resize_handles(&self) -> impl IntoElement {
+        let edge = |id: &'static str, e: ResizeEdge, cursor: CursorStyle| {
+            div().id(id).absolute().cursor(cursor).on_mouse_down(MouseButton::Left, move |_, window, _| window.start_window_resize(e))
+        };
+        let t = 4.0;
+        div()
+            .child(edge("rz-t", ResizeEdge::Top, CursorStyle::ResizeUpDown).top_0().left(px(t)).right(px(t)).h(px(t)))
+            .child(edge("rz-b", ResizeEdge::Bottom, CursorStyle::ResizeUpDown).bottom_0().left(px(t)).right(px(t)).h(px(t)))
+            .child(edge("rz-l", ResizeEdge::Left, CursorStyle::ResizeLeftRight).left_0().top(px(t)).bottom(px(t)).w(px(t)))
+            .child(edge("rz-r", ResizeEdge::Right, CursorStyle::ResizeLeftRight).right_0().top(px(t)).bottom(px(t)).w(px(t)))
+            .child(edge("rz-tl", ResizeEdge::TopLeft, CursorStyle::ResizeUpLeftDownRight).top_0().left_0().size(px(t)))
+            .child(edge("rz-tr", ResizeEdge::TopRight, CursorStyle::ResizeUpRightDownLeft).top_0().right_0().size(px(t)))
+            .child(edge("rz-bl", ResizeEdge::BottomLeft, CursorStyle::ResizeUpRightDownLeft).bottom_0().left_0().size(px(t)))
+            .child(edge("rz-br", ResizeEdge::BottomRight, CursorStyle::ResizeUpLeftDownRight).bottom_0().right_0().size(px(t)))
+    }
+}
+
+impl Render for App {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Remote area = window minus the chrome that is currently visible.
+        let vp = window.viewport_size();
+        let top = if self.st.full { 0.0 } else { TITLE_H } + if self.st.pinned { TOOLBAR_H } else { 0.0 };
+        self.area.set(Bounds::new(point(px(0.0), px(top)), size(vp.width, (vp.height - px(top)).max(px(0.0)))));
+
+        let view = self.st.view;
+        let content = self.remote_content(cx);
+
+        let area = div()
+            .id("remote")
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .bg(rgb(0x000000))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, _| {
+                window.focus(&this.focus);
+                this.pointer(ev.position, Some(1), Some(true));
+            }))
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer(ev.position, Some(2), Some(true))))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer(ev.position, Some(4), Some(true))))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, _| this.pointer(ev.position, Some(1), Some(false))))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, ev: &MouseUpEvent, _, _| this.pointer(ev.position, Some(2), Some(false))))
+            .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| this.pointer(ev.position, Some(4), Some(false))))
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| this.pointer(ev.position, None, None)))
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, _| {
+                let dy = match ev.delta {
+                    ScrollDelta::Pixels(p) => f32::from(p.y),
+                    ScrollDelta::Lines(l) => l.y,
+                };
+                this.scroll(ev.position, dy);
+            }))
+            .child(content)
+            .when(!self.st.pinned, |d| d.child(self.pull_tab(cx)))
+            .when(view == View::Idle && self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| d.child(self.virtual_banner(cx)))
+            .when(view == View::Menu, |d| {
+                d.child(
+                    // Backdrop: a click outside the menu closes it (§5).
+                    div().id("menu-backdrop").absolute().top_0().left_0().right_0().bottom_0().on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_overlay(window, cx))),
+                )
+                .child(self.menu(cx))
+            })
+            .when(view == View::Switcher, |d| d.child(self.switcher(cx)))
+            .when(view == View::Dialog, |d| d.child(self.dialog(cx)))
+            .when(view == View::Manage, |d| d.child(self.manage_panel(cx)))
+            .when(view == View::Settings, |d| d.child(self.settings_panel(cx)))
+            .when(view == View::Password, |d| d.child(self.password_prompt(cx)));
+
+        div()
+            .id("root")
+            .key_context("SeeMyMac")
+            .track_focus(&self.focus)
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .bg(rgb(BG_CHROME))
+            .text_color(rgb(TEXT))
+            .text_size(px(13.0))
+            .when_some(self.font.clone(), |d, f| d.font_family(f))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key_down(ev, window, cx)))
+            .on_key_up(cx.listener(|this, ev: &KeyUpEvent, window, cx| this.on_key_up(ev, window, cx)))
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, window, cx| this.on_modifiers(ev, window, cx)))
+            .when(!self.st.full, |d| d.child(self.title_bar(cx)))
+            .when(self.st.pinned, |d| d.child(self.toolbar(cx)))
+            .child(area)
+            .when(!self.st.full && !window.is_maximized(), |d| d.child(self.resize_handles()))
+    }
+}

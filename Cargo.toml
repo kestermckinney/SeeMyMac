@@ -1,0 +1,78 @@
+[package]
+name = "see_my_mac"
+version = "0.1.0"
+edition = "2021"
+default-run = "see_my_mac"
+
+[dependencies]
+gpui = "0.2.2"
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+serde_json = "1.0"
+image = { version = "0.25", default-features = false }
+smallvec = "1"
+aes = "0.8"
+des = "0.8"
+md-5 = "0.10"
+num-bigint = { version = "0.4", features = ["rand"] }
+rand = "0.8"
+dirs = "5"
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+flate2 = "1"
+# Native Apple High Performance engine (src/hp/).
+rust_h264 = "0.6"
+rust_h265 = "0.4"
+rsa = "0.9"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+plist = "1"
+socket2 = "0.5"
+
+[profile.dev.package.see_my_mac]
+# Frame conversion runs per pixel; unoptimised code is far too slow for live video.
+opt-level = 3
+
+[profile.dev.package.rust_h264]
+# Live H.264 decoding needs an optimised decoder even in debug builds.
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"
+codegen-units = 16
+incremental = true
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
+
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
+# rust_h264 plus a P_Skip fill for Apple's truncated slices (see Decoder::set_fill_truncated_p_slices).
+rust_h264 = { path = "vendor/rust_h264" }
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
+
+# This allows running the ui_driver tool from the main project
+[[bin]]
+name = "ui_driver"
+path = "src/bin/ui_driver.rs"
+
+# Optional Wayland dependencies for full functionality (uncomment to enable)
+# [dependencies.wayland-client]
+# version = "0.30"
+# 
+# [dependencies.wayland-protocols]
+# version = "0.30"
