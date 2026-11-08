@@ -307,6 +307,36 @@ fn two_monitors_selector_shortcuts_and_both_view(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |a, _| a.st.monitor("c1")), Mon::One);
 }
 
+/// macOS reports no monitors over plain VNC: the layout remembered from Apple HP
+/// splits the desktop, but only when it spans exactly this desktop's size.
+#[gpui::test]
+fn vnc_uses_the_remembered_display_layout(cx: &mut TestAppContext) {
+    let (port, _rx) = fake_mac(128, 36, false);
+    let mut store = store_with(Some(port));
+    store.get_mut("c1").unwrap().display_layout = vec![[0, 0, 64, 36], [64, 0, 64, 36]];
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "two monitors from the layout", |a| a.sessions["c1"].monitors == 2 && !a.sessions["c1"].tiles.is_empty());
+    cx.simulate_keystrokes("ctrl-alt-home");
+    tick_until(cx, &view, "both live tiles", |a| a.sessions["c1"].tiles.iter().map(|t| (t.monitor, t.size)).collect::<Vec<_>>() == vec![(0, (64, 36)), (1, (64, 36))]);
+    cx.simulate_keystrokes("ctrl-alt-pagedown");
+    tick_until(cx, &view, "monitor 2", |a| a.sessions["c1"].tiles.len() == 1 && a.sessions["c1"].tiles[0].monitor == 1);
+}
+
+#[gpui::test]
+fn vnc_ignores_a_layout_for_a_different_desktop(cx: &mut TestAppContext) {
+    let (port, _rx) = fake_mac(128, 36, false);
+    let mut store = store_with(Some(port));
+    store.get_mut("c1").unwrap().display_layout = vec![[0, 0, 64, 36], [64, 0, 80, 36]];
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "picture", |a| !a.sessions["c1"].tiles.is_empty());
+    for _ in 0..5 {
+        cx.update(|window, cx| view.update(cx, |app, cx| app.tick(window, cx)));
+    }
+    assert_eq!(view.read_with(cx, |a, _| a.sessions["c1"].monitors), 1);
+}
+
 #[gpui::test]
 fn session_shortcuts_switcher_and_fullscreen(cx: &mut TestAppContext) {
     let (p1, _r1) = fake_mac(32, 18, false);
@@ -486,71 +516,67 @@ fn apple_hp_session_streams_from_the_synthetic_source(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |a, _| a.st.no_sessions()));
 }
 
-/// Apple HP streams one Mac display at a time: picking a monitor asks the Mac to
-/// switch, and "Both" shows the live display beside a snapshot of the other
-/// (captured by briefly switching to it). The synthetic source plays the Mac.
+/// Apple HP streams only the Mac's main physical display, so a Mac with two shows
+/// one monitor (its layout is remembered for VNC). With two virtual displays each
+/// is streamed separately: monitors 1, 2 and "Both" are all live. The synthetic
+/// source plays the Mac (display 2's picture is tinted green).
 #[gpui::test]
-fn apple_hp_monitors_switch_the_stream_and_both_shows_a_snapshot(cx: &mut TestAppContext) {
+fn apple_hp_two_virtual_displays_are_live_monitors(cx: &mut TestAppContext) {
     std::env::set_var("SEEMYMAC_DEMO", "1");
     let mut store = Store::load(None);
     let mut c = Connection::blank("hp2".into());
     c.host = "two-displays.invalid".into();
     c.credentials = CredentialMode::Ask;
     c.resolution = crate::model::Resolution::Hd;
+    c.virtual_display = true;
+    c.virtual_displays = 2;
     store.upsert(c);
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
     open_and_login(cx, &view, "hp2");
-    tick_until(cx, &view, "two HP displays", |a| a.sessions["hp2"].monitors == 2 && !a.sessions["hp2"].tiles.is_empty());
+    tick_until(cx, &view, "HP picture", |a| a.sessions["hp2"].status == Status::Connected && !a.sessions["hp2"].tiles.is_empty());
     std::env::remove_var("SEEMYMAC_DEMO");
     view.update(cx, |a, _| a.st.pinned = true);
-    draw(cx);
-    // The first picture is the Mac's main display, shown live.
-    let green = |a: &App| {
-        let t = &a.sessions["hp2"].tiles[0];
-        (t.monitor, t.live)
-    };
-    assert_eq!(view.read_with(cx, |a, _| green(a)), (0, true));
+    // On the Mac's own screens: one monitor; the physical layout is remembered for VNC.
+    assert_eq!(view.read_with(cx, |a, _| a.sessions["hp2"].monitors), 1);
+    assert_eq!(view.read_with(cx, |a, _| a.store.get("hp2").unwrap().display_layout.clone()), vec![[0, 0, 1280, 720], [1280, 0, 1280, 720]]);
 
-    // Monitor 2: the Mac is asked to stream display 2; a notice shows meanwhile.
+    // Two virtual displays: two live monitors.
+    cx.simulate_keystrokes("ctrl-alt-v");
+    tick_until(cx, &view, "two monitors", |a| a.sessions["hp2"].monitors == 2);
+    let green = |a: &App| a.sessions["hp2"].tiles.first().and_then(|t| t.image.as_bytes(0).map(|b| b[1] == 255)).unwrap_or(false);
     cx.simulate_keystrokes("ctrl-alt-pagedown");
-    tick_until(cx, &view, "monitor 2 streaming", |a| a.sessions["hp2"].tiles.len() == 1 && a.sessions["hp2"].tiles[0].monitor == 1);
-    tick_until(cx, &view, "notice cleared", |a| a.sessions["hp2"].notice.is_none());
+    tick_until(cx, &view, "monitor 2 (the second stream)", |a| a.sessions["hp2"].tiles.len() == 1 && a.sessions["hp2"].tiles[0].monitor == 1 && green(a));
     draw(cx);
-
-    // Both: display 2 is live, display 1 is the snapshot taken before the switch.
     cx.simulate_keystrokes("ctrl-alt-home");
-    tick_until(cx, &view, "both tiles", |a| a.sessions["hp2"].tiles.len() == 2);
-    let tiles = view.read_with(cx, |a, _| a.sessions["hp2"].tiles.iter().map(|t| (t.monitor, t.live)).collect::<Vec<_>>());
-    assert_eq!(tiles, vec![(0, false), (1, true)]);
+    tick_until(cx, &view, "both monitors", |a| a.sessions["hp2"].tiles.iter().map(|t| t.monitor).collect::<Vec<_>>() == vec![0, 1]);
     draw(cx);
-
-    // Clicking monitor 1 in the "Both" view zooms in and streams it live again.
-    view.update(cx, |a, _| a.st.zoom_into("hp2", Mon::One));
-    tick_until(cx, &view, "monitor 1 live", |a| a.sessions["hp2"].tiles.len() == 1 && a.sessions["hp2"].tiles[0].monitor == 0 && a.sessions["hp2"].tiles[0].live);
+    cx.simulate_keystrokes("ctrl-alt-pageup");
+    tick_until(cx, &view, "monitor 1", |a| a.sessions["hp2"].tiles.len() == 1 && a.sessions["hp2"].tiles[0].monitor == 0 && !green(a));
     cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("hp2", window, cx)));
 }
 
-/// Opening "Both" before the other display was ever shown captures it first.
+/// With one virtual display there is no second stream: a single monitor.
 #[gpui::test]
-fn apple_hp_both_view_captures_a_display_never_shown(cx: &mut TestAppContext) {
+fn apple_hp_one_virtual_display_is_one_monitor(cx: &mut TestAppContext) {
     std::env::set_var("SEEMYMAC_DEMO", "1");
     let mut store = Store::load(None);
     let mut c = Connection::blank("hp3".into());
     c.host = "two-displays.invalid".into();
     c.credentials = CredentialMode::Ask;
     c.resolution = crate::model::Resolution::Hd;
-    c.multi_monitor = crate::model::MultiMonitor::SideBySide;
+    c.virtual_display = true;
     store.upsert(c);
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
     open_and_login(cx, &view, "hp3");
-    tick_until(cx, &view, "two HP displays", |a| a.sessions["hp3"].monitors == 2);
+    tick_until(cx, &view, "HP picture", |a| !a.sessions["hp3"].tiles.is_empty());
     std::env::remove_var("SEEMYMAC_DEMO");
-    assert_eq!(view.read_with(cx, |a, _| a.st.monitor("hp3")), Mon::All, "side-by-side connections open on Both");
-    tick_until(cx, &view, "both tiles after capturing display 2", |a| a.sessions["hp3"].tiles.len() == 2 && a.sessions["hp3"].notice.is_none());
-    // Back on the main display, which is live; display 2 is the captured snapshot.
-    tick_until(cx, &view, "main display live again", |a| a.sessions["hp3"].tiles.iter().map(|t| (t.monitor, t.live)).collect::<Vec<_>>() == vec![(0, true), (1, false)]);
-    view.update(cx, |a, _| a.st.pinned = true);
-    draw(cx);
+    assert!(view.read_with(cx, |a, _| a.sessions["hp3"].handle.as_ref().unwrap().fb2.is_none()));
+    cx.simulate_keystrokes("ctrl-alt-v");
+    for _ in 0..10 {
+        cx.update(|window, cx| view.update(cx, |app, cx| app.tick(window, cx)));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(view.read_with(cx, |a, _| a.sessions["hp3"].monitors), 1);
     cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("hp3", window, cx)));
 }
 
@@ -806,9 +832,17 @@ fn live_apple_hp_typing_reaches_the_mac(cx: &mut TestAppContext) {
     use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent};
     let _ = env_logger::builder().is_test(true).filter_module("see_my_mac", log::LevelFilter::Debug).try_init();
     let id: &'static str = Box::leak(std::env::var("SEEMYMAC_LIVE").expect("SEEMYMAC_LIVE=connection id").into_boxed_str());
-    let mut store = Store::load(Store::default_path());
-    let mut c = store.get(id).expect("saved connection").clone();
+    // A copy of the saved connection in an in-memory store: the overrides below
+    // must never be written back to the user's connections.json.
+    let mut c = Store::load(Store::default_path()).get(id).expect("saved connection").clone();
+    let mut store = Store::load(None);
     c.virtual_display = std::env::var_os("SEEMYMAC_LIVE_VIRTUAL").is_some();
+    if let Some(n) = std::env::var("SEEMYMAC_LIVE_DISPLAYS").ok().and_then(|v| v.parse().ok()) {
+        c.virtual_displays = n;
+    }
+    if std::env::var("SEEMYMAC_LIVE_PROTO").as_deref() == Ok("vnc") {
+        c.proto = Proto::Vnc;
+    }
     c.credentials = CredentialMode::Vault;
     store.upsert(c);
     let pw = keyring::Entry::new("SeeMyMac", id).unwrap().get_password().expect("saved password");
@@ -851,12 +885,28 @@ fn live_apple_hp_typing_reaches_the_mac(cx: &mut TestAppContext) {
         let (op, arg) = step.split_once(':').unwrap_or((step, ""));
         match op {
             "snap" => view.read_with(cx, |a, _| {
-                let f = a.sessions[id].handle.as_ref().unwrap().fb.lock().unwrap();
-                let mut ppm = format!("P6\n{} {}\n255\n", f.width, f.height).into_bytes();
-                for px in f.bgra.chunks_exact(4) {
-                    ppm.extend_from_slice(&[px[2], px[1], px[0]]);
+                // What is drawn: every tile (the UI takes HP frames out of the framebuffer).
+                for (i, t) in a.sessions[id].tiles.iter().enumerate() {
+                    let mut ppm = format!("P6\n{} {}\n255\n", t.size.0, t.size.1).into_bytes();
+                    for px in t.image.as_bytes(0).unwrap_or_default().chunks_exact(4) {
+                        ppm.extend_from_slice(&[px[2], px[1], px[0]]);
+                    }
+                    std::fs::write(format!("{shots}/live_{arg}_{i}.ppm"), ppm).unwrap();
                 }
-                std::fs::write(format!("{shots}/live_{arg}.ppm"), ppm).unwrap();
+            }),
+            "state" => view.read_with(cx, |a, _| {
+                let s = &a.sessions[id];
+                let f = s.handle.as_ref().unwrap().fb.lock().unwrap();
+                println!(
+                    "LIVE: monitor choice {:?}, monitors {}, on virtual {}, tiles {:?}, second stream version {:?}, fb showing {:?}, displays {:?}",
+                    a.st.monitor(id),
+                    s.monitors,
+                    s.on_virtual,
+                    s.tiles.iter().map(|t| (t.monitor, t.size, t.resolution)).collect::<Vec<_>>(),
+                    s.handle.as_ref().unwrap().fb2.as_ref().map(|f2| f2.lock().unwrap().version),
+                    f.showing,
+                    f.displays
+                );
             }),
             "click" | "rclick" | "move" => {
                 // Remote pixel -> window position, through the same geometry the app uses.
@@ -895,22 +945,30 @@ fn live_apple_hp_typing_reaches_the_mac(cx: &mut TestAppContext) {
                 if v.is_empty() { std::env::remove_var(k) } else { std::env::set_var(k, v) }
             }
             "require_locked" => {
-                // Refuse to continue (and so to type a password) unless the lock screen's
-                // large white clock is showing in the top centre of the Mac's screen.
-                let white = view.read_with(cx, |a, _| {
-                    let f = a.sessions[id].handle.as_ref().unwrap().fb.lock().unwrap();
-                    let (w, h) = (f.width as usize, f.height as usize);
-                    let mut n = 0;
+                // Refuse to continue (and so to type a password) unless the lock screen
+                // shows: its large clock (white, or lavender on the dynamic wallpaper)
+                // in the top centre, over mostly deep-blue wallpaper.
+                let (clock, blue, total) = view.read_with(cx, |a, _| {
+                    // The drawn picture (the UI takes HP frames out of the framebuffer).
+                    let t = &a.sessions[id].tiles[0];
+                    let bgra = t.image.as_bytes(0).unwrap_or_default();
+                    let (w, h) = (t.size.0 as usize, t.size.1 as usize);
+                    let (mut clock, mut blue, mut total) = (0, 0, 0);
                     for y in h * 6 / 100..h * 22 / 100 {
                         for x in w * 38 / 100..w * 62 / 100 {
-                            let p = &f.bgra[(y * w + x) * 4..(y * w + x) * 4 + 3];
-                            n += (p.iter().all(|&c| c > 200)) as usize;
+                            let p = &bgra[(y * w + x) * 4..(y * w + x) * 4 + 3];
+                            let (b, g, r) = (p[0] as i32, p[1] as i32, p[2] as i32);
+                            let white = b > 200 && g > 200 && r > 200;
+                            let lavender = b > 230 && r > 130 && g > 100 && b - g > 60;
+                            clock += (white || lavender) as usize;
+                            blue += (b > r + 80 && b > g + 80) as usize;
+                            total += 1;
                         }
                     }
-                    n
+                    (clock, blue, total)
                 });
-                println!("LIVE: lock-screen clock pixels: {white}");
-                assert!(white > 3000, "the Mac does not show its lock screen; refusing to type the password");
+                println!("LIVE: lock-screen clock pixels: {clock}, wallpaper blue {}%", blue * 100 / total.max(1));
+                assert!(clock > 1500 && blue * 100 >= total * 60, "the Mac does not show its lock screen; refusing to type the password");
             }
             "banner" => {
                 draw(cx);
@@ -919,6 +977,21 @@ fn live_apple_hp_typing_reaches_the_mac(cx: &mut TestAppContext) {
                 println!("LIVE: virtual-display banner {} (switch pending: {pending})", if shown { "painted" } else { "not painted" });
             }
             "shortcut" => cx.simulate_keystrokes(arg),
+            // "display:all" / "display:ID": send SetDisplayMessage directly.
+            "display" => view.read_with(cx, |a, _| {
+                let h = a.sessions[id].handle.as_ref().unwrap();
+                let d = match arg {
+                    "all" => None,
+                    // "other": the last listed display that is not the one shown.
+                    "other" => {
+                        let f = h.fb.lock().unwrap();
+                        f.displays.iter().rev().map(|d| d.id).find(|d| Some(*d) != f.showing)
+                    }
+                    _ => Some(u32::from_str_radix(arg.trim_start_matches("0x"), 16).unwrap()),
+                };
+                println!("LIVE: asking for display {d:?}");
+                h.send(crate::rfb::Input::ShowDisplay(d));
+            }),
             other => panic!("unknown step {other}"),
         }
         pump(cx, 0.1);

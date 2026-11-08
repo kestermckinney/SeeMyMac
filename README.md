@@ -66,17 +66,24 @@ needed:
   session offers to move to a virtual display after login, which decodes in a
   few milliseconds.
 
-Multiple displays: over HP the Mac streams one display at a time. The monitor
-selector (toolbar, or Ctrl+Alt+PgUp / PgDn) asks the Mac to switch displays
-(SetDisplayMessage, about a second); the Mac scales the chosen display into the
-canvas negotiated at connect time, so a 6K display beside a 5K iMac arrives at
-5K. **Both** (Ctrl+Alt+Home) shows the streamed display live beside the latest
-snapshot of the other one, capturing it first if it was never shown; click a
-monitor to show it live. Plain VNC sends the whole desktop, so its **Both** view
-is live on every monitor. On a virtual display only that display is shown.
+Multiple displays: over HP the Mac streams only its main display; its other
+physical displays cannot be shown, whatever the viewer asks for once a user is
+logged in. Two ways to see two displays:
+
+- **Two virtual displays** (connection dialog → Display → Virtual displays: 2).
+  After "Use virtual display" the Mac creates two virtual displays side by side
+  and streams each separately (the second over UDP port 5902); they appear as
+  monitors 1 and 2, and **Both** (Ctrl+Alt+Home) shows them side by side, all live.
+- **Plain VNC** for the Mac's physical displays: it sends the whole desktop. macOS
+  does not say where each monitor is over VNC, so SeeMyMac uses the layout it
+  learnt during an earlier HP session to the same Mac (when the sizes match).
+
+The monitor selector (toolbar, or Ctrl+Alt+PgUp / PgDn / Home) appears when there
+are two monitors.
 
 Requirements: a Mac with Apple silicon on macOS 14 or later with Screen Sharing on,
-an IPv4 address, and UDP ports 5900 and 5901 (the connection port and the next one)
+an IPv4 address, and UDP ports 5900 and 5901 (the connection port and the next one;
+also 5902 for two virtual displays)
 reachable. Audio, clipboard sync and remote cursor shapes are not implemented over
 HP; the local pointer is shown instead. **Settings → Apple HP → Check decoder**
 verifies the bundled decoders; `SEEMYMAC_DEMO=1` starts a synthetic HP source for

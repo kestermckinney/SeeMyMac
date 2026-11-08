@@ -41,16 +41,9 @@ pub struct Tile {
     pub size: (u32, u32),
     /// Which remote monitor this is (0-based).
     pub monitor: usize,
-    /// False for a snapshot: Apple HP streams one display at a time, so in the
-    /// "Both" view the other display shows its last picture.
-    pub live: bool,
-}
-
-/// Apple HP "Both" view: briefly show a display that has no snapshot yet.
-struct Capture {
-    target: u32,
-    back: Option<u32>,
-    started: Instant,
+    /// The monitor's real resolution, for its label. Apple HP scales a display
+    /// into the canvas negotiated at connect, so `size` can differ.
+    pub resolution: (u32, u32),
 }
 
 pub struct Session {
@@ -81,18 +74,14 @@ pub struct Session {
     virtual_offered: bool,
     /// Apple HP: the Mac's screen is 5K or larger (slow to decode; see the banner).
     pub big_screen: bool,
-    /// Apple HP: the session moved to a virtual display (only that one is shown).
+    /// Apple HP: the session moved to virtual displays.
     pub on_virtual: bool,
-    /// Apple HP: the latest picture of each Mac display (by display id); the
-    /// one being streamed is `live`.
-    shots: Vec<(u32, Tile)>,
-    live: Option<u32>,
-    /// Apple HP: the display last asked for, and a snapshot being captured.
-    hp_requested: Option<u32>,
-    capture: Option<Capture>,
-    capture_tried: Vec<u32>,
-    /// Shown over the picture while the Mac switches displays.
-    pub notice: Option<String>,
+    /// Apple HP: the latest picture of each video stream (the second exists with
+    /// two virtual displays), and the stream version last taken.
+    streams: [Option<Tile>; 2],
+    seen_stream2: u64,
+    /// Apple HP: the picture pointer positions refer to (0 or 1).
+    pointer_target: u8,
     /// Where the shown monitor sits in the remote framebuffer (for pointer events).
     offset: (u16, u16),
     /// The connection's multi-monitor preference was applied (once per session).
@@ -284,12 +273,9 @@ impl App {
                 virtual_offered: false,
                 big_screen: false,
                 on_virtual: false,
-                shots: vec![],
-                live: None,
-                hp_requested: None,
-                capture: None,
-                capture_tried: vec![],
-                notice: None,
+                streams: [None, None],
+                seen_stream2: 0,
+                pointer_target: 0,
                 offset: (0, 0),
                 multi_applied: false,
             };
@@ -355,10 +341,7 @@ impl App {
         s.virtual_offered = false;
         s.big_screen = false;
         s.on_virtual = false;
-        s.hp_requested = None;
-        s.capture = None;
-        s.capture_tried.clear();
-        s.notice = None;
+        s.pointer_target = 0;
 
         let handle = match conn.proto {
             Proto::Apple => {
@@ -377,12 +360,14 @@ impl App {
                 s.virtual_pending = conn.virtual_display.then_some((w, h));
                 s.virtual_size = (w, h);
                 s.virtual_offered = conn.virtual_display;
-                hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: false, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
+                hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: false, virtual_displays: conn.virtual_displays.clamp(1, 2) as u32, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
             }
             _ => rfb::connect(rfb::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone() }),
         };
         
-        handle.fb.lock().unwrap().wake = Some(self.wake.clone());
+        for fb in std::iter::once(&handle.fb).chain(handle.fb2.as_ref()) {
+            fb.lock().unwrap().wake = Some(self.wake.clone());
+        }
         s.handle = Some(handle);
     }
 
@@ -398,7 +383,7 @@ impl App {
 
     fn release_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(mut s) = self.sessions.remove(id) {
-            for t in s.tiles.drain(..).chain(s.shots.drain(..).map(|(_, t)| t)) {
+            for t in s.tiles.drain(..).chain(s.streams.iter_mut().filter_map(Option::take)) {
                 cx.drop_image(t.image, Some(window));
             }
             // Dropping the handle shuts the socket.
@@ -426,6 +411,7 @@ impl App {
         let mut changed = false;
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
         let mut prompt: Option<(String, String)> = None;
+        let mut layout_learnt = false;
         for id in ids {
             let active = self.st.active.as_deref() == Some(id.as_str());
             let conn = self.store.get(&id).cloned();
@@ -499,13 +485,37 @@ impl App {
                 continue;
             }
             let due = active || s.last_build.elapsed() > Duration::from_secs(1);
+            let layout = conn.as_ref().map_or(vec![], |c| c.display_layout.clone());
             let (version, monitors, displays) = {
-                let f = h.fb.lock().unwrap();
+                let mut f = h.fb.lock().unwrap();
+                // Plain VNC to a Mac: no monitor list, so use the layout learnt over HP
+                // when it tiles exactly this desktop.
+                if f.displays.is_empty() && f.screens.is_empty() {
+                    if let Some(screens) = layout_screens(&layout, f.width, f.height) {
+                        log::info!("{} monitors from the remembered display layout", screens.len());
+                        f.screens = screens;
+                        f.version += 1;
+                    }
+                }
                 // Apple HP lists the Mac's displays (one is streamed at a time); VNC
                 // reports the monitors within its whole-desktop framebuffer.
-                let n = if f.displays.is_empty() { f.monitors() } else if s.on_virtual { 1 } else { f.displays.len() as u32 };
+                // Apple HP streams one display per video stream: two monitors only with
+                // two virtual displays (the second stream has a picture).
+                let n = if f.displays.is_empty() && h.fb2.is_none() {
+                    f.monitors()
+                } else {
+                    1 + (s.on_virtual && h.fb2.as_ref().map_or(false, |f2| f2.lock().unwrap().version > 0)) as u32
+                };
                 (f.version, n, f.displays.clone())
             };
+            // Remember the Mac's physical display layout for plain VNC sessions.
+            if !s.on_virtual && displays.len() > 1 {
+                let learnt: Vec<[u32; 4]> = displays.iter().map(|d| [d.x, d.y, d.width, d.height]).collect();
+                if let Some(c) = self.store.get_mut(&id).filter(|c| c.display_layout != learnt) {
+                    c.display_layout = learnt;
+                    layout_learnt = true;
+                }
+            }
             if monitors != s.monitors {
                 // "Side by side" connections open on the "Both" view.
                 if monitors > 1 && !s.multi_applied {
@@ -523,10 +533,10 @@ impl App {
             let mon = self.st.monitor(&id);
             let eff_mon = if active { mon } else { Mon::One };
             let mut retired = vec![];
-            if !displays.is_empty() {
+            if !displays.is_empty() || h.fb2.is_some() || version > 0 && h.fb.lock().unwrap().whole_frames {
                 // The handle is lent out so the refresh can update the session too.
                 if let Some(h) = s.handle.take() {
-                    changed |= hp_refresh(s, &h, &displays, version, due, active, eff_mon, self.last_input, &mut retired);
+                    changed |= hp_refresh(s, &h, due, eff_mon, self.last_input, &mut retired);
                     s.handle = Some(h);
                 }
             } else if due && (version != s.seen_version || s.seen_mon != Some(eff_mon) || s.tiles.is_empty()) {
@@ -549,7 +559,7 @@ impl App {
                     } else {
                         rects
                             .into_iter()
-                            .filter_map(|(monitor, r)| make_image(r.w, r.h, f.crop(r)).map(|image| Tile { image, size: (r.w, r.h), monitor, live: true }))
+                            .filter_map(|(monitor, r)| make_image(r.w, r.h, f.crop(r)).map(|image| Tile { image, size: (r.w, r.h), monitor, resolution: (r.w, r.h) }))
                             .collect::<Vec<_>>()
                     }
                 };
@@ -567,6 +577,9 @@ impl App {
             for image in retired {
                 cx.drop_image(image, Some(window));
             }
+        }
+        if layout_learnt {
+            self.persist();
         }
         if let Some(slot) = &self.hp_check {
             let done = slot.lock().unwrap().take();
@@ -860,8 +873,6 @@ impl App {
         if let (Some((width, height)), Some(h)) = (s.virtual_pending.take(), &s.handle) {
             h.send(Input::UseVirtualDisplay { width, height });
             s.on_virtual = true;
-            s.hp_requested = None;
-            s.capture = None;
             cx.notify();
         }
     }
@@ -1204,37 +1215,37 @@ impl App {
     }
 }
 
-/// Apple HP picture refresh. The Mac streams one display at a time, so the picture
-/// is always a whole display: take it from the framebuffer (no copy), keep it as
-/// that display's snapshot, ask the Mac for the display the user picked, and for
-/// "Both" show the live display beside the other's latest snapshot (capturing
-/// one first if there is none). Returns whether anything visible changed; images
-/// no longer shown are pushed to `retired`.
-#[allow(clippy::too_many_arguments)]
-fn hp_refresh(s: &mut Session, h: &rfb::Handle, displays: &[rfb::RemoteDisplay], version: u64, due: bool, active: bool, mon: Mon, last_input: Option<Instant>, retired: &mut Vec<Arc<RenderImage>>) -> bool {
-    let mut changed = false;
-    let mut fresh = None;
-    if due && version != s.seen_version {
-        let t0 = Instant::now();
-        let (frame, showing, arrived) = {
-            let mut f = h.fb.lock().unwrap();
-            let (w, ht) = (f.width, f.height);
-            let bgra = if f.whole_frames { std::mem::take(&mut f.bgra) } else { f.crop(f.monitor_rect(usize::MAX)) };
-            s.seen_version = f.version;
-            let ok = w > 0 && bgra.len() == (w * ht * 4) as usize;
-            (ok.then(|| make_image(w, ht, bgra).map(|image| (image, (w, ht)))).flatten(), f.showing, f.published)
-        };
-        if let Some((image, size)) = frame {
-            s.size = size;
-            let key = showing.unwrap_or(0);
-            let monitor = displays.iter().position(|d| d.id == key).unwrap_or(0);
-            let tile = Tile { image, size, monitor, live: true };
-            match s.shots.iter_mut().find(|(d, _)| *d == key) {
-                Some(e) => retired.push(std::mem::replace(&mut e.1, tile).image),
-                None => s.shots.push((key, tile)),
+/// Apple HP picture refresh. Each video stream's picture is one whole display:
+/// take it from its framebuffer (no copy) and keep it as that stream's latest
+/// picture. With two virtual displays there are two streams, shown as monitors 1
+/// and 2, or side by side for "Both". Returns whether anything visible changed;
+/// images no longer shown are pushed to `retired`.
+fn hp_refresh(s: &mut Session, h: &rfb::Handle, due: bool, mon: Mon, last_input: Option<Instant>, retired: &mut Vec<Arc<RenderImage>>) -> bool {
+    let mut fresh = false;
+    if due {
+        for (stream, fb) in std::iter::once(&h.fb).chain(h.fb2.as_ref()).enumerate() {
+            let t0 = Instant::now();
+            let (frame, arrived) = {
+                let mut f = fb.lock().unwrap();
+                let seen = if stream == 0 { &mut s.seen_version } else { &mut s.seen_stream2 };
+                if f.version == *seen {
+                    continue;
+                }
+                *seen = f.version;
+                let (w, ht) = (f.width, f.height);
+                let bgra = if f.whole_frames { std::mem::take(&mut f.bgra) } else { f.crop(f.monitor_rect(usize::MAX)) };
+                let resolution = f.displays.iter().find(|d| Some(d.id) == f.showing).map_or((w, ht), |d| (d.width, d.height));
+                let ok = w > 0 && bgra.len() == (w * ht * 4) as usize;
+                (ok.then(|| make_image(w, ht, bgra).map(|image| Tile { image, size: (w, ht), monitor: stream, resolution })).flatten(), f.published)
+            };
+            let Some(tile) = frame else { continue };
+            if stream == 0 {
+                s.size = tile.size;
             }
-            s.live = Some(key);
-            fresh = Some(key);
+            if let Some(old) = s.streams[stream].replace(tile) {
+                retired.push(old.image);
+            }
+            fresh = true;
             if let (Some(a), Some(i)) = (arrived, last_input) {
                 if i.elapsed() < Duration::from_secs(1) {
                     log::debug!("UI: picture ready to draw {} ms after it arrived (hand-off took {} ms)", a.elapsed().as_millis(), t0.elapsed().as_millis());
@@ -1242,69 +1253,43 @@ fn hp_refresh(s: &mut Session, h: &rfb::Handle, displays: &[rfb::RemoteDisplay],
             }
         }
     }
-
-    // Which display the Mac should stream (only for the session on screen).
-    let multi = !s.on_virtual && displays.len() > 1;
-    if multi && active {
-        let ids: Vec<u32> = displays.iter().take(2).map(|d| d.id).collect();
-        let current = s.hp_requested.or(s.live);
-        let mut ask = None;
-        if let Some(c) = &s.capture {
-            if fresh == Some(c.target) || c.started.elapsed() > Duration::from_secs(6) {
-                ask = c.back.or(ids.first().copied());
-                s.capture = None;
-            }
-        } else {
-            match mon {
-                Mon::One | Mon::Two => {
-                    let want = ids[if mon == Mon::Two { 1 } else { 0 }];
-                    if current != Some(want) {
-                        ask = Some(want);
-                    }
-                }
-                Mon::All => {
-                    let missing = ids.iter().copied().find(|d| !s.shots.iter().any(|(x, _)| x == d) && !s.capture_tried.contains(d));
-                    if let Some(target) = missing {
-                        s.capture_tried.push(target);
-                        s.capture = Some(Capture { target, back: current, started: Instant::now() });
-                        ask = Some(target);
-                    }
-                }
-            }
-        }
-        if let Some(d) = ask {
-            h.send(Input::ShowDisplay(Some(d)));
-            s.hp_requested = Some(d);
-            changed = true;
-        }
+    if !(fresh || s.seen_mon != Some(mon) || (s.tiles.is_empty() && s.streams[0].is_some())) {
+        return false;
     }
-    let name = |id: u32| format!("Monitor {}", displays.iter().position(|d| d.id == id).map_or(1, |i| i + 1));
-    let notice = match (&s.capture, s.hp_requested) {
-        (Some(c), _) => Some(format!("Capturing {} for the side-by-side view…", name(c.target))),
-        (None, Some(want)) if multi && active && s.live != Some(want) => Some(format!("Switching to {}…", name(want))),
-        _ => None,
+    let dual = s.on_virtual && s.streams[1].is_some();
+    let tile = |i: usize| s.streams[i].as_ref().map(|t| Tile { image: t.image.clone(), size: t.size, monitor: i, resolution: t.resolution });
+    let shown: &[usize] = match (mon, dual) {
+        (Mon::All, true) => &[0, 1],
+        (Mon::Two, true) => &[1],
+        _ => &[0],
     };
-    if notice != s.notice {
-        s.notice = notice;
-        changed = true;
+    // The images belong to `streams`; only replaced pictures are retired.
+    s.tiles = shown.iter().filter_map(|&i| tile(i)).collect();
+    let target = if dual && mon == Mon::Two { 1 } else { 0 };
+    if target != s.pointer_target {
+        s.pointer_target = target;
+        h.send(Input::PointerTarget(target));
     }
+    s.offset = (0, 0); // the HP session maps pointer positions onto the shown display
+    s.seen_mon = Some(mon);
+    s.last_build = Instant::now();
+    true
+}
 
-    // Compose what is drawn: the live display, or for "Both" one per display.
-    if fresh.is_some() || s.seen_mon != Some(mon) || (s.tiles.is_empty() && !s.shots.is_empty()) {
-        let tile = |id: u32, monitor: usize| s.shots.iter().find(|(x, _)| *x == id).map(|(_, t)| Tile { image: t.image.clone(), size: t.size, monitor, live: s.live == Some(id) });
-        let tiles: Vec<Tile> = if mon == Mon::All && multi {
-            displays.iter().take(2).enumerate().filter_map(|(i, d)| tile(d.id, i)).collect()
-        } else {
-            s.live.and_then(|id| tile(id, displays.iter().position(|d| d.id == id).unwrap_or(0))).into_iter().collect()
-        };
-        // The images belong to `shots`; only replaced snapshots are retired.
-        s.tiles = tiles;
-        s.offset = (0, 0); // the HP session maps pointer positions onto the shown display
-        s.seen_mon = Some(mon);
-        s.last_build = Instant::now();
-        changed = true;
+/// Monitor rectangles (left to right) from a remembered display layout, if it
+/// has several displays that exactly span a `w`x`h` desktop.
+fn layout_screens(layout: &[[u32; 4]], w: u32, h: u32) -> Option<Vec<geometry_screen::Screen>> {
+    if layout.len() < 2 || w == 0 || h == 0 {
+        return None;
     }
-    changed
+    let mut screens: Vec<geometry_screen::Screen> = layout.iter().map(|&[x, y, w, h]| geometry_screen::Screen { x, y, w, h }).collect();
+    let fits = screens.iter().all(|s| s.w > 0 && s.h > 0 && s.x + s.w <= w && s.y + s.h <= h);
+    let span = (screens.iter().map(|s| s.x + s.w).max()?, screens.iter().map(|s| s.y + s.h).max()?);
+    if !fits || span != (w, h) {
+        return None;
+    }
+    screens.sort_by_key(|s| (s.x, s.y));
+    Some(screens)
 }
 
 /// Local alias so `app.rs` need not import the type with a long path.

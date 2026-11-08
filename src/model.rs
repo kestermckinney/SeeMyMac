@@ -172,6 +172,10 @@ fn yes() -> bool {
     true
 }
 
+fn one() -> u8 {
+    1
+}
+
 pub const GROUPS: [&str; 4] = ["Servers", "Plant floor", "Lab", "No group"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,9 +202,18 @@ pub struct Connection {
     /// Apple HP only: ask the Mac for a virtual display (blanks the Mac's own screens).
     #[serde(default = "yes")]
     pub virtual_display: bool,
+    /// Apple HP only: how many virtual displays (1 or 2) to use; with 2 each is
+    /// streamed separately and shown as its own monitor.
+    #[serde(default = "one")]
+    pub virtual_displays: u8,
     pub local: LocalResources,
     /// Unix seconds of the last connect; 0 = never. Drives the Recent list.
     pub last_used: u64,
+    /// The Mac's physical displays as (x, y, width, height) in backing pixels,
+    /// learnt from Apple HP sessions. macOS does not report its monitors over
+    /// plain VNC, so a VNC desktop of the same overall size is split with these.
+    #[serde(default)]
+    pub display_layout: Vec<[u32; 4]>,
 }
 
 impl Connection {
@@ -225,8 +238,10 @@ impl Connection {
             multi_monitor: MultiMonitor::OneAtATime,
             span_monitors: false,
             virtual_display: true,
+            virtual_displays: 1,
             local: LocalResources::default(),
             last_used: 0,
+            display_layout: vec![],
         }
     }
 

@@ -214,13 +214,19 @@ pub struct Offers {
     /// The SSRCs we advertise (Apple only accepts RTCP/RTP from these).
     pub video_ssrc: u32,
     pub audio_ssrc: u32,
+    /// A second video stream (empty when not offered), for a second virtual display.
+    pub video2: Vec<u8>,
+    pub video2_ssrc: u32,
 }
 
-pub fn create(codec: CodecOffer) -> Offers {
+/// `second_video`: also offer a second video stream (for two virtual displays).
+pub fn create(codec: CodecOffer, second_video: bool) -> Offers {
     let mut r = rand::thread_rng();
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
     let (vs, as_) = (r.next_u32(), r.next_u32());
-    Offers { video: plist_for(&media_blob(true, vs, ts, codec), 7), audio: plist_for(&media_blob(false, as_, ts, codec), 8), video_ssrc: vs, audio_ssrc: as_ }
+    let vs2 = r.next_u32();
+    let video2 = if second_video { plist_for(&media_blob(true, vs2, ts, codec), 7) } else { vec![] };
+    Offers { video: plist_for(&media_blob(true, vs, ts, codec), 7), audio: plist_for(&media_blob(false, as_, ts, codec), 8), video_ssrc: vs, audio_ssrc: as_, video2, video2_ssrc: vs2 }
 }
 
 /// Parse (canvas width, height, tiles) out of the Mac's 0x1c answer, which arrives
@@ -296,7 +302,7 @@ mod tests {
     #[test]
     fn offers_advertise_their_ssrcs_and_codec_banks() {
         for (codec, banks) in [(CodecOffer::Both, 2), (CodecOffer::AvcOnly, 1)] {
-            let o = create(codec);
+            let o = create(codec, false);
             let v = blob_of(&o.video);
             let (mut ssrc, mut n_banks, mut tiles) = (None, 0, 0);
             walk(&v, |f, wt, _, b| {

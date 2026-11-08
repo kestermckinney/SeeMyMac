@@ -42,6 +42,9 @@ pub struct Config {
     /// Ask the Mac for a virtual display. This blanks the Mac's own screens while
     /// connected; without it the Mac streams its physical display.
     pub virtual_display: bool,
+    /// How many virtual displays to use (1 or 2). With 2 the Mac streams each one
+    /// separately; the second arrives in `Handle::fb2`.
+    pub virtual_displays: u32,
     /// A built-in synthetic picture: no Mac, no network.
     pub demo: bool,
 }
@@ -52,7 +55,9 @@ pub fn connect(cfg: Config) -> Handle {
     let (in_tx, in_rx) = channel();
     let fb = Arc::new(Mutex::new(Framebuffer::default()));
     let closer: Closer = Arc::new(Mutex::new(None));
-    let handle = Handle::from_parts(ev_rx, fb.clone(), in_tx, closer.clone());
+    let mut handle = Handle::from_parts(ev_rx, fb.clone(), in_tx, closer.clone());
+    let fb2 = (cfg.virtual_displays >= 2).then(|| Arc::new(Mutex::new(Framebuffer::default())));
+    handle.fb2 = fb2.clone();
     std::thread::Builder::new()
         .name(format!("hp-{}", cfg.host))
         .spawn(move || {
@@ -61,7 +66,7 @@ pub fn connect(cfg: Config) -> Handle {
                 let st = stopping.clone();
                 *closer.lock().unwrap() = Some(Box::new(move || st.store(true, Ordering::SeqCst)));
             }
-            let result = if cfg.demo { demo(&cfg, &fb, &stopping, in_rx, &ev_tx) } else { session::run(&cfg, &fb, &closer, &stopping, in_rx, &ev_tx) };
+            let result = if cfg.demo { demo(&cfg, &fb, fb2.as_ref(), &stopping, in_rx, &ev_tx) } else { session::run(&cfg, &fb, fb2.as_ref(), &closer, &stopping, in_rx, &ev_tx) };
             let reason = match result {
                 Err(e) if !stopping.load(Ordering::SeqCst) => {
                     log::warn!("{}: Apple High Performance session failed: {e:#}", cfg.host);
@@ -82,13 +87,14 @@ pub fn self_test() -> String {
 }
 
 /// A moving test pattern at 60 fps, for UI tests and demos. A host name starting
-/// with "two-displays" acts like a Mac with two displays (ids 1 and 2) that
-/// streams one at a time, as Apple HP does; display 2's picture is tinted green.
-fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input: Receiver<Input>, events: &Sender<Event>) -> anyhow::Result<()> {
+/// with "two-displays" acts like a Mac with two physical displays (ids 1 and 2)
+/// that streams only its main one, as Apple HP does; with two virtual displays
+/// (after "Use virtual display") it streams both, the second tinted green.
+fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Framebuffer>>>, stopping: &AtomicBool, input: Receiver<Input>, events: &Sender<Event>) -> anyhow::Result<()> {
     let (w, h) = (cfg.width.max(64), cfg.height.max(64));
     let two = std::env::var("SEEMYMAC_DEMO_DISPLAYS").as_deref() == Ok("2");
     let hp_two = cfg.host.starts_with("two-displays");
-    let mut showing = 1u32;
+    let mut dual = false;
     let _ = events.send(Event::Stage("Starting the synthetic Apple High Performance source…".into()));
     let mut base = vec![0u8; (w * h * 4) as usize];
     for (i, px) in base.chunks_exact_mut(4).enumerate() {
@@ -99,7 +105,7 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
     let mut next = Instant::now();
     while !stopping.load(Ordering::SeqCst) {
         match input.recv_timeout(next.saturating_duration_since(Instant::now())) {
-            Ok(Input::ShowDisplay(Some(id))) if hp_two && (id == 1 || id == 2) => showing = id,
+            Ok(Input::UseVirtualDisplay { .. }) if hp_two && fb2.is_some() => dual = true,
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
@@ -108,11 +114,6 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
         }
         next += Duration::from_millis(16);
         let mut img = base.clone();
-        if showing == 2 {
-            for px in img.chunks_exact_mut(4) {
-                px[1] = 255;
-            }
-        }
         let left = (n * 13) % (w - 100).max(1);
         for y in h / 3..(h / 3 + 100.min(h / 3)) {
             for x in left..(left + 100).min(w) {
@@ -120,8 +121,12 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
                 img[o..o + 4].copy_from_slice(&[255, 255, 255, 255]);
             }
         }
-        {
-            let mut f = fb.lock().unwrap();
+        let displays = match (hp_two, dual) {
+            (true, false) => vec![RemoteDisplay { id: 1, x: 0, y: 0, width: w, height: h }, RemoteDisplay { id: 2, x: w, y: 0, width: w, height: h }],
+            (true, true) => vec![RemoteDisplay { id: 11, x: 0, y: 0, width: w, height: h }, RemoteDisplay { id: 12, x: w, y: 0, width: w, height: h }],
+            _ => vec![],
+        };
+        let publish = |f: &mut Framebuffer, img: Vec<u8>, showing: u32| {
             f.width = w;
             f.height = h;
             f.bgra = img;
@@ -129,13 +134,21 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
             f.name = "Synthetic Mac".into();
             f.screens = if two { vec![Screen { x: 0, y: 0, w: w / 2, h }, Screen { x: w / 2, y: 0, w: w - w / 2, h }] } else { vec![] };
             if hp_two {
-                f.displays = vec![RemoteDisplay { id: 1, width: w, height: h }, RemoteDisplay { id: 2, width: w, height: h }];
+                f.displays = displays.clone();
                 f.showing = Some(showing);
                 f.whole_frames = true;
             }
             f.version += 1;
             f.wake();
+        };
+        if let (true, Some(fb2)) = (dual, fb2) {
+            let mut green = img.clone();
+            for px in green.chunks_exact_mut(4) {
+                px[1] = 255;
+            }
+            publish(&mut fb2.lock().unwrap(), green, 12);
         }
+        publish(&mut fb.lock().unwrap(), img, if dual { 11 } else { 1 });
         if n == 0 {
             let _ = events.send(Event::Connected { width: w, height: h, name: "Synthetic Mac".into() });
         }
@@ -150,7 +163,7 @@ mod tests {
 
     #[test]
     fn demo_session_paints_frames_and_stops() {
-        let h = connect(Config { host: "demo".into(), port: 5900, username: String::new(), password: String::new(), width: 320, height: 200, virtual_display: true, demo: true });
+        let h = connect(Config { host: "demo".into(), port: 5900, username: String::new(), password: String::new(), width: 320, height: 200, virtual_display: true, virtual_displays: 1, demo: true });
         let end = Instant::now() + Duration::from_secs(5);
         let mut connected = false;
         while Instant::now() < end && !connected {

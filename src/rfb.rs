@@ -76,7 +76,9 @@ pub struct Framebuffer {
 pub struct RemoteDisplay {
     /// The Mac's display id (CGDirectDisplayID).
     pub id: u32,
-    /// Size in backing pixels.
+    /// Position and size within the whole desktop, in backing pixels.
+    pub x: u32,
+    pub y: u32,
     pub width: u32,
     pub height: u32,
 }
@@ -170,6 +172,9 @@ pub enum Input {
     /// or all of them combined into one picture (`None`). Ignored by plain VNC,
     /// which always sends the whole desktop.
     ShowDisplay(Option<u32>),
+    /// Apple High Performance with two virtual displays: pointer positions that
+    /// follow refer to picture 0 (the first display) or 1 (the second).
+    PointerTarget(u8),
 }
 
 /// The input channel as the network side reads it: a run of queued pointer
@@ -230,13 +235,15 @@ pub type Closer = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 pub struct Handle {
     pub events: Receiver<Event>,
     pub fb: Arc<Mutex<Framebuffer>>,
+    /// Apple High Performance with two virtual displays: the second one's pictures.
+    pub fb2: Option<Arc<Mutex<Framebuffer>>>,
     input: Sender<Input>,
     closer: Closer,
 }
 
 impl Handle {
     pub fn from_parts(events: Receiver<Event>, fb: Arc<Mutex<Framebuffer>>, input: Sender<Input>, closer: Closer) -> Self {
-        Self { events, fb, input, closer }
+        Self { events, fb, fb2: None, input, closer }
     }
 
     pub fn send(&self, i: Input) {
@@ -331,7 +338,7 @@ fn run(
                     m.extend_from_slice(&keysym.to_be_bytes());
                     m
                 }
-                Input::UseVirtualDisplay { .. } | Input::ShowDisplay(_) => continue,
+                Input::UseVirtualDisplay { .. } | Input::ShowDisplay(_) | Input::PointerTarget(_) => continue,
             };
             if w2.lock().unwrap().write_all(&msg).is_err() {
                 break;

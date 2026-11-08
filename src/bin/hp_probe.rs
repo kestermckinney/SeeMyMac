@@ -49,6 +49,7 @@ fn main() {
         width: std::env::var("SEEMYMAC_PROBE_W").ok().and_then(|v| v.parse().ok()).unwrap_or(1920),
         height: std::env::var("SEEMYMAC_PROBE_H").ok().and_then(|v| v.parse().ok()).unwrap_or(1080),
         virtual_display: std::env::var_os("SEEMYMAC_NO_VIRTUAL").is_none(),
+        virtual_displays: std::env::var("SEEMYMAC_PROBE_DISPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
         demo: false,
     };
     let t0 = Instant::now();

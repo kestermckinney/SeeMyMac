@@ -215,6 +215,7 @@ fn gather(sock: &UdpSocket, packets: &mut Vec<Vec<u8>>, key: &[u8; SRTP_BLOB_LEN
 
 // ----- shared state -----------------------------------------------------------
 
+#[derive(Clone)]
 struct Layout {
     backing: (u32, u32),
     displays: Vec<Display>,
@@ -249,7 +250,6 @@ struct Shared {
     reconfig: Option<Instant>,
     server_sr: HashMap<u32, (u32, Instant)>,
     canvas: (u32, u32),
-    layout: Option<Layout>,
     /// Region of the Mac's pointer coordinate space shown by the current picture.
     pointer_area: Screen,
     /// Size of the last published picture, so input never waits on the framebuffer lock.
@@ -377,7 +377,10 @@ fn parse_layout(p: &[u8]) -> Option<((u32, u32), (u32, u32), Vec<Display>)> {
 /// A display picked with SetDisplayMessage (`selected`) is always that display:
 /// the Mac scales it into the canvas negotiated at connect time, so its size
 /// need not match (a 6K display arrives in a 5K iMac's 5120x2880 canvas).
-fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32), selected: Option<u32>) -> (Screen, Vec<Screen>, Option<u32>) {
+///
+/// With two virtual displays (`slot` = this stream's index) each stream shows
+/// one of them: the last two displays in the layout, left to right.
+fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32), selected: Option<u32>, slot: Option<usize>) -> (Screen, Vec<Screen>, Option<u32>) {
     let (w, h) = pic;
     let Some(l) = layout.filter(|l| l.backing.0 > 0 && l.backing.1 > 0) else {
         let (cw, ch) = if canvas.0 > 0 && canvas.1 > 0 { canvas } else { pic };
@@ -385,6 +388,14 @@ fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32)
     };
     if let Some(d) = selected.and_then(|id| l.displays.iter().find(|d| d.id == id)) {
         return (d.pixel, vec![], Some(d.id));
+    }
+    if let (Some(i), n) = (slot, l.displays.len()) {
+        if n >= 2 {
+            let mut pair = [l.displays[n - 2], l.displays[n - 1]];
+            pair.sort_by_key(|d| (d.pixel.x, d.pixel.y));
+            let d = pair[i.min(1)];
+            return (d.pixel, vec![], Some(d.id));
+        }
     }
     if l.displays.len() > 1 {
         if let Some(d) = l.displays.iter().rev().find(|d| (d.pixel.w, d.pixel.h) == (w, h)) {
@@ -414,16 +425,51 @@ fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32)
 
 // ----- threads ----------------------------------------------------------------
 
+/// One video stream and what it shares with the session. The first stream shows
+/// the Mac's display; with two virtual displays a second `Ctx` (stream 1) shows
+/// the other one, sharing the control channel, layout and halt flag.
 struct Ctx {
+    /// 0: the first video stream; 1: the second virtual display's.
+    stream: usize,
     shared: Mutex<Shared>,
     media: Media,
-    control: Control,
+    control: Arc<Control>,
+    layout: Arc<Mutex<Option<Layout>>>,
+    /// Two virtual displays are in use, one per stream.
+    dual: Arc<AtomicBool>,
     fb: Arc<Mutex<Framebuffer>>,
     events: Sender<Event>,
-    halt: AtomicBool,
+    halt: Arc<AtomicBool>,
     name: String,
-    offers: Offers,
-    keys: negotiate::Keys,
+    offers: Arc<Offers>,
+    keys: Arc<negotiate::Keys>,
+}
+
+fn new_shared(ssrc: u32, seq: HashMap<u32, (u32, u16)>, canvas: (u32, u32), started: bool) -> Shared {
+    let now = Instant::now();
+    Shared {
+        ssrc,
+        blacklist: HashSet::new(),
+        seq,
+        nack: HashSet::new(),
+        keyframe_wanted: started,
+        last_fir: None,
+        fir_seq: 0,
+        post_layout_fir: false,
+        last_publish: now,
+        last_packet: started.then_some(now),
+        last_restart: now,
+        restart_decoder: false,
+        reconfig: None,
+        server_sr: HashMap::new(),
+        canvas,
+        pointer_area: Screen { x: 0, y: 0, w: 0, h: 0 },
+        pic_size: (0, 0),
+        input_at: None,
+        selected: None,
+        switching: None,
+        dead: None,
+    }
 }
 
 impl Ctx {
@@ -433,13 +479,15 @@ impl Ctx {
 
     fn publish(&self, pic: &Picture, bgra: &mut Vec<u8>, last_size: &mut (u32, u32)) {
         let (w, h) = (pic.width, pic.height);
+        let layout = self.layout.lock().unwrap().clone();
+        let slot = self.dual.load(Ordering::SeqCst).then_some(self.stream);
         let (area, screens, showing, displays) = {
             let mut sh = self.shared.lock().unwrap();
             sh.last_publish = Instant::now();
             sh.keyframe_wanted = false;
             // Geometry follows the decoded size; monitor rectangles shrink with a halved picture.
             let k = pic.scale.max(1);
-            let mut r = picture_geometry((w * k, h * k), sh.layout.as_ref(), sh.canvas, sh.selected);
+            let mut r = picture_geometry((w * k, h * k), layout.as_ref(), sh.canvas, sh.selected, slot);
             for m in &mut r.1 {
                 *m = Screen { x: m.x / k, y: m.y / k, w: m.w / k, h: m.h / k };
             }
@@ -448,7 +496,7 @@ impl Ctx {
             if let Some(t) = sh.input_at.take() {
                 log::debug!("HP: next picture {} ms after the last click/key was sent", t.elapsed().as_millis());
             }
-            let displays = sh.layout.as_ref().map_or(vec![], |l| l.displays.iter().map(|d| RemoteDisplay { id: d.id, width: d.pixel.w, height: d.pixel.h }).collect());
+            let displays = layout.as_ref().map_or(vec![], |l| l.displays.iter().map(|d| RemoteDisplay { id: d.id, x: d.pixel.x, y: d.pixel.y, width: d.pixel.w, height: d.pixel.h }).collect());
             (r.0, r.1, r.2, displays)
         };
         {
@@ -469,7 +517,9 @@ impl Ctx {
         }
         if *last_size != (w, h) {
             *last_size = (w, h);
-            let _ = self.events.send(Event::Connected { width: w, height: h, name: self.name.clone() });
+            if self.stream == 0 {
+                let _ = self.events.send(Event::Connected { width: w, height: h, name: self.name.clone() });
+            }
         }
     }
 }
@@ -769,10 +819,11 @@ fn handle_control(ctx: &Ctx, m: &[u8]) {
                 let Some((scaled, backing, displays)) = parse_layout(p) else { continue };
                 log::info!("HP display layout: scaled {}x{}, backing {}x{}, displays {:?}", scaled.0, scaled.1, backing.0, backing.1, displays);
                 let changed = {
+                    let mut lay = ctx.layout.lock().unwrap();
                     let mut sh = ctx.shared.lock().unwrap();
-                    let changed = sh.layout.as_ref().map_or(false, |l| l.backing != backing && backing.0 > 0);
-                    let prev = sh.layout.take();
-                    sh.layout = Some(Layout {
+                    let changed = lay.as_ref().map_or(false, |l| l.backing != backing && backing.0 > 0);
+                    let prev = lay.take();
+                    *lay = Some(Layout {
                         backing: if backing.0 > 0 && backing.1 > 0 { backing } else { prev.as_ref().map_or(sh.canvas, |l| l.backing) },
                         displays,
                     });
@@ -835,7 +886,17 @@ fn tcp_reader(ctx: Arc<Ctx>, mut s: TcpStream, mut rx: Enc1103Rx, leftover: Vec<
 
 fn tick(ctx: &Ctx, hb: &mut SrtpTx, n: u64) {
     let _ = ctx.media.ctrl.send_to(&hb.encrypt(&HEARTBEAT, 101), ctx.media.host);
+    tick_stream(ctx, n);
+    // Keeps the control-channel pseudo-encoding sender armed without pulling video.
+    let _ = ctx.control.send(&fbu_request(true, 1, 1));
+}
+
+/// Per-stream upkeep: receiver reports, keyframe retries and stall recovery.
+fn tick_stream(ctx: &Ctx, n: u64) {
     let mut sh = ctx.shared.lock().unwrap();
+    if sh.ssrc == 0 {
+        return; // a second stream that has not started
+    }
     let ssrc = sh.ssrc;
     let (roc, max) = sh.seq.get(&ssrc).copied().unwrap_or((0, 0));
     let mut rr = rtp::rr(ctx.media.our_ssrc, &[(ssrc, roc, max)], &sh.server_sr);
@@ -877,14 +938,56 @@ fn tick(ctx: &Ctx, hb: &mut SrtpTx, n: u64) {
     } else if flowing && gap > Duration::from_secs(3) && sh.last_fir.map_or(true, |t| now - t >= Duration::from_millis(1500)) {
         ctx.media.keyframe(&mut sh, true);
     }
-    drop(sh);
-    // Keeps the control-channel pseudo-encoding sender armed without pulling video.
-    let _ = ctx.control.send(&fbu_request(true, 1, 1));
+}
+
+/// The second virtual display's video (port after the video port): wait for it
+/// to start (it only exists once two virtual displays do), then decode it like
+/// the first stream.
+fn second_stream(ctx: Arc<Ctx>, sock: UdpSocket, mut packets: Vec<Vec<u8>>) {
+    let key = ctx.keys.video_s;
+    let start = loop {
+        if ctx.halted() {
+            return;
+        }
+        match gather(&sock, &mut packets, &key, &ctx.halt) {
+            Ok(s) => break s,
+            Err(_) => {
+                // Video without usable parameter sets: they travel with keyframes, so ask
+                // the stream that is arriving for one.
+                let mut counts: HashMap<u32, usize> = HashMap::new();
+                for p in packets.iter().filter(|p| p.len() >= 12 && p[1] & 0x7f == 100) {
+                    *counts.entry(u32::from_be_bytes([p[8], p[9], p[10], p[11]])).or_default() += 1;
+                }
+                if let Some((&ssrc, _)) = counts.iter().max_by_key(|(_, n)| **n) {
+                    let mut sh = ctx.shared.lock().unwrap();
+                    sh.ssrc = ssrc;
+                    ctx.media.keyframe(&mut sh, true);
+                }
+                packets.clear();
+            }
+        }
+    };
+    log::info!("HP: the second display's video started ({:?})", start.codec);
+    {
+        let st = start.srtp.state(start.ssrc);
+        let mut sh = ctx.shared.lock().unwrap();
+        let canvas = sh.canvas;
+        *sh = new_shared(start.ssrc, HashMap::from([(start.ssrc, (st.roc, st.max_seq))]), canvas, true);
+    }
+    let (tx, rx) = sync_channel(16384);
+    let c = ctx.clone();
+    let reader = thread::Builder::new().name("hp-udp2".into()).spawn(move || udp_reader(c, sock, tx));
+    video_loop(ctx, rx, start);
+    if let Ok(r) = reader {
+        let _ = r.join();
+    }
 }
 
 // ----- entry point --------------------------------------------------------------
 
-pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping: &Arc<AtomicBool>, input: Receiver<Input>, events: &Sender<Event>) -> Result<()> {
+/// `fb2` receives the second virtual display's pictures (two virtual displays).
+#[allow(clippy::too_many_arguments)]
+pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Framebuffer>>>, closer: &Closer, stopping: &Arc<AtomicBool>, input: Receiver<Input>, events: &Sender<Event>) -> Result<()> {
     let stage = |t: String| {
         log::info!("{}: {t}", cfg.host);
         let _ = events.send(Event::Stage(t));
@@ -910,6 +1013,10 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
     let host_video = SocketAddrV4::new(*addr.ip(), video_port);
     let ctrl = net::bind_udp(cfg.port)?;
     let video = net::bind_udp(video_port)?;
+    // Two virtual displays: the second one's video arrives on the next port.
+    let dual_wanted = cfg.virtual_displays >= 2 && fb2.is_some();
+    let host_video2 = SocketAddrV4::new(*addr.ip(), video_port.wrapping_add(1));
+    let video2 = if dual_wanted { Some(net::bind_udp(video_port + 1)?) } else { None };
 
     stage("Opening the Mac's screen-sharing service…".into());
     negotiate::warmup(addr)?;
@@ -921,17 +1028,21 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
     let punch_stop = Arc::new(AtomicBool::new(false));
     let punch = {
         let (c, v, st) = (ctrl.try_clone()?, video.try_clone()?, punch_stop.clone());
+        let v2 = video2.as_ref().map(UdpSocket::try_clone).transpose()?;
         thread::spawn(move || {
             while !st.load(Ordering::SeqCst) {
                 let _ = c.send_to(&[0], host_ctrl);
                 let _ = v.send_to(&[0], host_video);
+                if let Some(v2) = &v2 {
+                    let _ = v2.send_to(&[0], host_video2);
+                }
                 thread::sleep(Duration::from_millis(100));
             }
         })
     };
     let on_socket = |s: &TcpStream| *live_tcp.lock().unwrap() = s.try_clone().ok();
-    let params = Params { addr, username: &cfg.username, password: &cfg.password, width: cfg.width, height: cfg.height, virtual_display: cfg.virtual_display, on_socket: &on_socket };
-    let result = (|| -> Result<(Negotiated, Offers, Startup)> {
+    let params = Params { addr, username: &cfg.username, password: &cfg.password, width: cfg.width, height: cfg.height, virtual_display: cfg.virtual_display, virtual_displays: if dual_wanted { 2 } else { 1 }, on_socket: &on_socket };
+    let result = (|| -> Result<(Negotiated, Offers, Startup, Vec<Vec<u8>>)> {
         let mut tries = 0;
         let mut last = Starved { packets: 0 };
         while tries < 3 {
@@ -939,17 +1050,20 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
                 bail!("cancelled");
             }
             // The Mac picks H.264 or HEVC; both are decoded. (A 5K screen can only be HEVC.)
-            let offers = offers::create(CodecOffer::Both);
+            // A second video stream is offered for a second virtual display.
+            let offers = offers::create(CodecOffer::Both, dual_wanted);
             let collector = Collector::start(video.try_clone()?);
+            let collector2 = video2.as_ref().map(|v| v.try_clone().map(Collector::start)).transpose()?;
             let neg = negotiate::negotiate(&params, &offers, &stage);
             let mut packets = collector.finish();
+            let packets2 = collector2.map_or(vec![], Collector::finish);
             let neg = neg?;
             if neg.canvas.0 == 0 {
                 log::warn!("HP: the Mac never reported a video canvas");
             }
             stage("Waiting for the first video packets…".into());
             match gather(&video, &mut packets, &neg.keys.video_s, stopping) {
-                Ok(s) => return Ok((neg, offers, s)),
+                Ok(s) => return Ok((neg, offers, s, packets2)),
                 Err(s) => {
                     neg.tcp.abort();
                     log::warn!("HP: startup video incomplete ({} packets); retrying", s.packets);
@@ -966,7 +1080,7 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
     })();
     punch_stop.store(true, Ordering::SeqCst);
     let _ = punch.join();
-    let (neg, offers, start) = match result {
+    let (neg, offers, start, packets2) = match result {
         Err(_) if cancelled() => return Ok(()),
         r => r?,
     };
@@ -976,56 +1090,70 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
     *live_tcp.lock().unwrap() = stream.try_clone().ok();
     let srtcp_rx = SrtcpRx::new(&keys.video_s);
     let mut hb = SrtpTx::new(&keys.audio_v, offers.audio_ssrc);
-    let now = Instant::now();
     let st0 = start.srtp.state(start.ssrc);
+    let (offers, keys) = (Arc::new(offers), Arc::new(keys));
+    let control = Arc::new(Control { w: Mutex::new((tx, stream.try_clone()?)), cbc_key });
+    let (layout, halt) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+    // Connecting straight onto two virtual displays (otherwise "Use virtual display" sets it).
+    let dual = Arc::new(AtomicBool::new(dual_wanted && cfg.virtual_display));
     let ctx = Arc::new(Ctx {
-        shared: Mutex::new(Shared {
-            ssrc: start.ssrc,
-            blacklist: HashSet::new(),
-            seq: HashMap::from([(start.ssrc, (st0.roc, st0.max_seq))]),
-            nack: HashSet::new(),
-            keyframe_wanted: true,
-            last_fir: None,
-            fir_seq: 0,
-            post_layout_fir: false,
-            last_publish: now,
-            last_packet: Some(now),
-            last_restart: now,
-            restart_decoder: false,
-            reconfig: None,
-            server_sr: HashMap::new(),
-            canvas,
-            layout: None,
-            pointer_area: Screen { x: 0, y: 0, w: 0, h: 0 },
-            pic_size: (0, 0),
-            input_at: None,
-            selected: None,
-            switching: None,
-            dead: None,
-        }),
+        stream: 0,
+        shared: Mutex::new(new_shared(start.ssrc, HashMap::from([(start.ssrc, (st0.roc, st0.max_seq))]), canvas, true)),
         media: Media { ctrl: ctrl.try_clone()?, host: host_ctrl, srtcp: Mutex::new(SrtcpTx::new(&keys.video_v)), our_ssrc: offers.video_ssrc },
-        control: Control { w: Mutex::new((tx, stream.try_clone()?)), cbc_key },
+        control: control.clone(),
+        layout: layout.clone(),
+        dual: dual.clone(),
         fb: fb.clone(),
         events: events.clone(),
-        halt: AtomicBool::new(false),
+        halt: halt.clone(),
         name: cfg.host.clone(),
-        offers,
-        keys,
+        offers: offers.clone(),
+        keys: keys.clone(),
     });
+    let ctx2 = match (video2, fb2) {
+        (Some(sock), Some(fb2)) => Some((
+            Arc::new(Ctx {
+                stream: 1,
+                shared: Mutex::new(new_shared(0, HashMap::new(), canvas, false)),
+                media: Media { ctrl: ctrl.try_clone()?, host: host_ctrl, srtcp: Mutex::new(SrtcpTx::new(&keys.video_v)), our_ssrc: offers.video2_ssrc },
+                control: control.clone(),
+                layout: layout.clone(),
+                dual: dual.clone(),
+                fb: fb2.clone(),
+                events: events.clone(),
+                halt: halt.clone(),
+                name: cfg.host.clone(),
+                offers: offers.clone(),
+                keys: keys.clone(),
+            }),
+            sock,
+        )),
+        _ => None,
+    };
     stage("Apple High Performance connected; waiting for video…".into());
 
     let (ptx, prx) = sync_channel(16384);
-    let threads = vec![
+    let mut threads = vec![
         { let c = ctx.clone(); thread::Builder::new().name("hp-udp".into()).spawn(move || udp_reader(c, video, ptx))? },
         { let c = ctx.clone(); thread::Builder::new().name("hp-video".into()).spawn(move || video_loop(c, prx, start))? },
         { let c = ctx.clone(); thread::Builder::new().name("hp-rtcp".into()).spawn(move || rtcp_reader(c, ctrl, srtcp_rx))? },
         { let c = ctx.clone(); let s = stream.try_clone()?; thread::Builder::new().name("hp-tcp".into()).spawn(move || tcp_reader(c, s, rx, leftover))? },
     ];
+    let ctx2 = match ctx2 {
+        Some((c2, sock)) => {
+            let c = c2.clone();
+            threads.push(thread::Builder::new().name("hp-video2".into()).spawn(move || second_stream(c, sock, packets2))?);
+            Some(c2)
+        }
+        None => None,
+    };
 
     let result = (|| -> Result<()> {
         let mut next = Instant::now();
         let mut n = 0u64;
         let mut last_buttons = 0u8;
+        // Which picture pointer positions refer to (1: the second virtual display's).
+        let mut pointer_on = &ctx;
         let mut input = crate::rfb::InputQueue::new(input);
         loop {
             if cancelled() {
@@ -1042,7 +1170,7 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
                         last_buttons = buttons;
                     }
                     let (size, area) = {
-                        let sh = ctx.shared.lock().unwrap();
+                        let sh = pointer_on.shared.lock().unwrap();
                         (sh.pic_size, sh.pointer_area)
                     };
                     if let Some((lx, ly)) = to_logical(size, area, x, y) {
@@ -1083,7 +1211,15 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
                         sh.selected = None;
                         sh.switching = None;
                     }
-                    ctx.control.send(&negotiate::virtual_display(width, height))?;
+                    let count = if ctx2.is_some() { 2 } else { 1 };
+                    ctx.dual.store(count == 2, Ordering::SeqCst);
+                    ctx.control.send(&negotiate::virtual_display(width, height, count))?;
+                }
+                Ok(Input::PointerTarget(t)) => {
+                    pointer_on = match (t, &ctx2) {
+                        (1, Some(c2)) => c2,
+                        _ => &ctx,
+                    };
                 }
                 Ok(Input::ShowDisplay(display)) => {
                     // Over HP the Mac streams one display at a time; "all displays"
@@ -1111,6 +1247,9 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
             }
             if Instant::now() >= next {
                 tick(&ctx, &mut hb, n);
+                if let Some(c2) = &ctx2 {
+                    tick_stream(c2, n);
+                }
                 n += 1;
                 next += TICK;
                 if next < Instant::now() {
@@ -1176,19 +1315,19 @@ mod tests {
 
         // A 1920x1080 picture is the virtual display: pointer at its pixel origin, one monitor.
         let layout = Layout { backing: b, displays: d.clone() };
-        assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080), None), (sc(2880, 0, 1920, 1080), vec![], Some(0)));
+        assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080), None, None), (sc(2880, 0, 1920, 1080), vec![], Some(0)));
         // A picture of the whole desktop maps to all backing pixels and reports both monitors.
-        let (area, screens, _) = picture_geometry((2400, 900), Some(&layout), (2400, 900), None);
+        let (area, screens, _) = picture_geometry((2400, 900), Some(&layout), (2400, 900), None, None);
         assert_eq!(area, sc(0, 0, 4800, 1800));
         assert_eq!(screens, vec![sc(0, 0, 1440, 900), sc(1440, 0, 960, 540)]);
         // The MacBook's own Retina screen alone (no virtual display): pointer positions
         // are its backing pixels, so the picture maps 1:1 (not halved to points).
         let panel = Layout { backing: (2880, 1800), displays: vec![d[0]] };
-        let (area, screens, _) = picture_geometry((2880, 1800), Some(&panel), (2880, 1800), None);
+        let (area, screens, _) = picture_geometry((2880, 1800), Some(&panel), (2880, 1800), None, None);
         assert_eq!((area, screens), (sc(0, 0, 2880, 1800), vec![]));
         assert_eq!(to_logical((2880, 1800), area, 1440, 1624), Some((1440, 1624)));
         // Before any layout: the negotiated canvas.
-        assert_eq!(picture_geometry((1920, 1080), None, (1920, 1080), None).0, sc(0, 0, 1920, 1080));
+        assert_eq!(picture_geometry((1920, 1080), None, (1920, 1080), None, None).0, sc(0, 0, 1920, 1080));
     }
 
     #[test]
@@ -1204,14 +1343,27 @@ mod tests {
             ],
         };
         // Nothing picked: the picture's size identifies the main display.
-        assert_eq!(picture_geometry((5120, 2880), Some(&layout), (5120, 2880), None), (sc(0, 0, 5120, 2880), vec![], Some(1)));
+        assert_eq!(picture_geometry((5120, 2880), Some(&layout), (5120, 2880), None, None), (sc(0, 0, 5120, 2880), vec![], Some(1)));
         // The 6K display scaled into the 5K canvas: pointer positions land on it.
-        let (area, screens, showing) = picture_geometry((5120, 2880), Some(&layout), (5120, 2880), Some(3));
+        let (area, screens, showing) = picture_geometry((5120, 2880), Some(&layout), (5120, 2880), Some(3), None);
         assert_eq!((area, screens, showing), (sc(5120, 0, 6016, 3384), vec![], Some(3)));
         // The halved picture's centre is the 6K display's centre.
         assert_eq!(to_logical((2560, 1440), area, 1280, 720), Some((5120 + 3008, 1692)));
         // An unknown id falls back to the size match.
-        assert_eq!(picture_geometry((5120, 2880), Some(&layout), (5120, 2880), Some(9)).2, Some(1));
+        assert_eq!(picture_geometry((5120, 2880), Some(&layout), (5120, 2880), Some(9), None).2, Some(1));
+    }
+
+    #[test]
+    fn two_virtual_displays_map_one_per_stream() {
+        // Two 1920x1080 virtual displays side by side (listed after nothing else when
+        // the Mac's own screens are curtained): stream 0 is the left one, stream 1 the right.
+        let sc = |x, y, w, h| Screen { x, y, w, h };
+        let d = |id, x| Display { id, pixel: sc(x, 0, 1920, 1080), point: sc(x, 0, 1920, 1080) };
+        let layout = Layout { backing: (3840, 1080), displays: vec![d(23, 0), d(24, 1920)] };
+        assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080), None, Some(0)), (sc(0, 0, 1920, 1080), vec![], Some(23)));
+        assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080), None, Some(1)), (sc(1920, 0, 1920, 1080), vec![], Some(24)));
+        // Pointer positions in the second picture land on the second display.
+        assert_eq!(to_logical((1920, 1080), sc(1920, 0, 1920, 1080), 10, 20), Some((1930, 20)));
     }
 
     #[test]

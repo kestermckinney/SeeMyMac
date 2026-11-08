@@ -50,8 +50,10 @@ fn viewer_info() -> Vec<u8> {
     m
 }
 
-/// 0x1d SetDisplayConfiguration: ask for a virtual display of `w`x`h` points at 1x.
-pub fn virtual_display(w: u32, h: u32) -> Vec<u8> {
+/// 0x1d SetDisplayConfiguration: ask for `count` (1 or 2) virtual displays of
+/// `w`x`h` points at 1x. With two, the Mac places them side by side and streams
+/// the second over its own video stream (see `media_message`).
+pub fn virtual_display(w: u32, h: u32, count: usize) -> Vec<u8> {
     const MODES: [(f64, f64); 5] = [(1920.0, 1080.0), (1440.0, 900.0), (1920.0, 1080.0), (1440.0, 810.0), (1312.0, 848.0)];
     let n = MODES.len();
     let size = 0x9c + 28 * n;
@@ -78,12 +80,20 @@ pub fn virtual_display(w: u32, h: u32) -> Vec<u8> {
         }
         d[o + 0x10..o + 0x18].copy_from_slice(&60.0f64.to_be_bytes());
     }
+    let count = count.clamp(1, 2);
     let mut m = vec![0x1d, 0];
-    m.extend_from_slice(&((8 + size) as u16).to_be_bytes());
+    m.extend_from_slice(&((8 + size * count) as u16).to_be_bytes());
     m.extend_from_slice(&1u16.to_be_bytes());
-    m.extend_from_slice(&1u16.to_be_bytes());
+    m.extend_from_slice(&(count as u16).to_be_bytes());
     m.extend_from_slice(&0u32.to_be_bytes());
-    m.extend_from_slice(&d);
+    for i in 0..count {
+        let mut di = d.clone();
+        if i > 0 {
+            let name = format!("SeeMyMac Virtual Display {}", i + 1);
+            di[2..2 + name.len()].copy_from_slice(name.as_bytes());
+        }
+        m.extend_from_slice(&di);
+    }
     m
 }
 
@@ -153,6 +163,17 @@ pub fn media_message(o: &Offers, k: &Keys) -> Vec<u8> {
     b[vo..vo + 0x2e].copy_from_slice(&k.video_v);
     b[vo + 0x2e..vo + 0x5c].copy_from_slice(&k.video_s);
     b[vo + 0x5c..vo + 0x5c + v].copy_from_slice(&o.video);
+    if !o.video2.is_empty() {
+        // A second video stream (for a second virtual display), arriving on the
+        // port after the video port. It uses the same SRTP keys as the first.
+        let v2 = o.video2.len();
+        b[0x0e..0x10].copy_from_slice(&(v2 as u16).to_be_bytes());
+        b.extend_from_slice(&k.video_v);
+        b.extend_from_slice(&k.video_s);
+        b.extend_from_slice(&o.video2);
+        let ms = b.len() - 4;
+        b[2..4].copy_from_slice(&(ms as u16).to_be_bytes());
+    }
     b
 }
 
@@ -175,6 +196,8 @@ pub struct Params<'a> {
     pub width: u32,
     pub height: u32,
     pub virtual_display: bool,
+    /// How many virtual displays to ask for (1 or 2).
+    pub virtual_displays: usize,
     /// Called with every new control connection (so it can be shut down to cancel).
     pub on_socket: &'a dyn Fn(&std::net::TcpStream),
 }
@@ -350,7 +373,7 @@ pub fn negotiate(p: &Params, offers: &Offers, stage: &dyn Fn(String)) -> Result<
     t.send(&viewer_info())?;
     std::thread::sleep(Duration::from_millis(100));
     if p.virtual_display {
-        t.send(&virtual_display(p.width, p.height))?;
+        t.send(&virtual_display(p.width, p.height, p.virtual_displays))?;
     }
     t.send(&set_encodings())?;
 
@@ -392,8 +415,13 @@ mod tests {
     fn fixed_messages_have_apple_layouts() {
         let v = viewer_info();
         assert_eq!((v.len(), &v[..4]), (66 + 12, &[0x21, 0, 0, 0x3e][..]));
-        let d = virtual_display(1920, 1080);
+        let d = virtual_display(1920, 1080, 1);
         assert_eq!(d[0], 0x1d);
+        // Two displays: the same descriptor twice, the count at +6.
+        let two = virtual_display(1920, 1080, 2);
+        assert_eq!(u16::from_be_bytes([two[6], two[7]]), 2);
+        assert_eq!(two.len() - 12, 2 * (d.len() - 12));
+        assert_eq!(u16::from_be_bytes([two[2], two[3]]) as usize, two.len() - 4);
         assert_eq!(u16::from_be_bytes([d[2], d[3]]) as usize, d.len() - 4);
         // First mode is 1920x1080 at 1x.
         let o = 12 + 0x9c;
@@ -405,13 +433,29 @@ mod tests {
 
     #[test]
     fn media_message_places_keys_and_offers() {
-        let o = offers::create(offers::CodecOffer::AvcOnly);
+        let o = offers::create(offers::CodecOffer::AvcOnly, false);
         let k = Keys::random();
         let m = media_message(&o, &k);
         let a = o.audio.len();
         assert_eq!(&m[0x24..0x52], &k.audio_v);
         assert_eq!(&m[0x80 + a + 0x2e..0x80 + a + 0x5c], &k.video_s);
         assert_eq!(&m[0x80 + a + 0x5c..], &o.video[..]);
+        assert_eq!(u16::from_be_bytes([m[2], m[3]]) as usize + 4, m.len());
+        assert_eq!(&m[0x0e..0x10], &[0, 0], "no second video stream");
+    }
+
+    #[test]
+    fn media_message_carries_a_second_video_stream() {
+        let o = offers::create(offers::CodecOffer::Both, true);
+        let k = Keys::random();
+        let m = media_message(&o, &k);
+        let (a, v, v2) = (o.audio.len(), o.video.len(), o.video2.len());
+        assert!(v2 > 0 && o.video2_ssrc != o.video_ssrc);
+        assert_eq!(u16::from_be_bytes([m[0x0e], m[0x0f]]) as usize, v2);
+        // Second stream after the first: its two keys, then its offer.
+        let o2 = 0x80 + a + 0x5c + v;
+        assert_eq!(&m[o2 + 0x2e..o2 + 0x5c], &k.video_s);
+        assert_eq!(&m[o2 + 0x5c..], &o.video2[..]);
         assert_eq!(u16::from_be_bytes([m[2], m[3]]) as usize + 4, m.len());
     }
 }
