@@ -215,7 +215,6 @@ fn gather(sock: &UdpSocket, packets: &mut Vec<Vec<u8>>, key: &[u8; SRTP_BLOB_LEN
 
 struct Layout {
     backing: (u32, u32),
-    scaled: (u32, u32),
     displays: Vec<Display>,
 }
 
@@ -745,7 +744,6 @@ fn handle_control(ctx: &Ctx, m: &[u8]) {
                     let prev = sh.layout.take();
                     sh.layout = Some(Layout {
                         backing: if backing.0 > 0 && backing.1 > 0 { backing } else { prev.as_ref().map_or(sh.canvas, |l| l.backing) },
-                        scaled,
                         displays,
                     });
                     if changed {
@@ -1111,7 +1109,7 @@ mod tests {
         assert_eq!(d, vec![Display { pixel: sc(0, 0, 2880, 1800), point: sc(0, 0, 1440, 900) }, Display { pixel: sc(2880, 0, 1920, 1080), point: sc(1440, 0, 1920, 1080) }]);
 
         // A 1920x1080 picture is the virtual display: pointer at its pixel origin, one monitor.
-        let layout = Layout { backing: b, scaled: s, displays: d.clone() };
+        let layout = Layout { backing: b, displays: d.clone() };
         assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080)), (sc(2880, 0, 1920, 1080), vec![]));
         // A picture of the whole desktop maps to all backing pixels and reports both monitors.
         let (area, screens) = picture_geometry((2400, 900), Some(&layout), (2400, 900));
@@ -1119,7 +1117,7 @@ mod tests {
         assert_eq!(screens, vec![sc(0, 0, 1440, 900), sc(1440, 0, 960, 540)]);
         // The MacBook's own Retina screen alone (no virtual display): pointer positions
         // are its backing pixels, so the picture maps 1:1 (not halved to points).
-        let panel = Layout { backing: (2880, 1800), scaled: (1440, 900), displays: vec![d[0]] };
+        let panel = Layout { backing: (2880, 1800), displays: vec![d[0]] };
         let (area, screens) = picture_geometry((2880, 1800), Some(&panel), (2880, 1800));
         assert_eq!((area, screens), (sc(0, 0, 2880, 1800), vec![]));
         assert_eq!(to_logical((2880, 1800), area, 1440, 1624), Some((1440, 1624)));

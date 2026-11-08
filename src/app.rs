@@ -4,7 +4,7 @@
 use crate::geometry;
 use crate::hp;
 use crate::model::{self, Connection, Proto, Scaling, Store};
-use crate::rfb::{self, Event, Input, Handle};
+use crate::rfb::{self, Event, Input};
 use crate::settings::Settings;
 use crate::state::{AppState, Mon, View};
 use crate::vault;
