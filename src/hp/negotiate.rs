@@ -87,6 +87,23 @@ pub fn virtual_display(w: u32, h: u32) -> Vec<u8> {
     m
 }
 
+/// 0x0d SetDisplayMessage: stream one display (`Some(id)`) or all of them
+/// combined into a single picture (`None`).
+pub fn set_display(display: Option<u32>) -> Vec<u8> {
+    let mut m = vec![0x0d, display.is_none() as u8, 0, 0];
+    m.extend_from_slice(&display.unwrap_or(0).to_be_bytes());
+    m
+}
+
+#[cfg(test)]
+mod display_tests {
+    #[test]
+    fn set_display_message_layout() {
+        assert_eq!(super::set_display(Some(3)), vec![0x0d, 0, 0, 0, 0, 0, 0, 3]);
+        assert_eq!(super::set_display(None), vec![0x0d, 1, 0, 0, 0, 0, 0, 0]);
+    }
+}
+
 pub fn fbu_request(incremental: bool, w: u16, h: u16) -> Vec<u8> {
     let mut m = vec![0x03, incremental as u8, 0, 0, 0, 0];
     m.extend_from_slice(&w.to_be_bytes());

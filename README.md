@@ -66,12 +66,24 @@ needed:
   session offers to move to a virtual display after login, which decodes in a
   few milliseconds.
 
+Multiple displays: over HP the Mac streams one display at a time. The monitor
+selector (toolbar, or Ctrl+Alt+PgUp / PgDn) asks the Mac to switch displays
+(SetDisplayMessage, about a second); the Mac scales the chosen display into the
+canvas negotiated at connect time, so a 6K display beside a 5K iMac arrives at
+5K. **Both** (Ctrl+Alt+Home) shows the streamed display live beside the latest
+snapshot of the other one, capturing it first if it was never shown; click a
+monitor to show it live. Plain VNC sends the whole desktop, so its **Both** view
+is live on every monitor. On a virtual display only that display is shown.
+
 Requirements: a Mac with Apple silicon on macOS 14 or later with Screen Sharing on,
 an IPv4 address, and UDP ports 5900 and 5901 (the connection port and the next one)
 reachable. Audio, clipboard sync and remote cursor shapes are not implemented over
 HP; the local pointer is shown instead. **Settings → Apple HP → Check decoder**
 verifies the bundled decoders; `SEEMYMAC_DEMO=1` starts a synthetic HP source for
 testing without a Mac.
+
+Debug builds compile every dependency optimised (see `Cargo.toml`); without that,
+the HEVC decoder alone falls seconds behind live video.
 
 For diagnosis, `cargo run --release --bin hp_probe -- @CONNECTION_ID 30` connects
 with a saved connection (password from the keyring) and prints each stage and

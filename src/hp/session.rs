@@ -8,7 +8,7 @@ use super::net::{self, is_timeout};
 use super::offers::{self, CodecOffer, Offers};
 use super::rtp::{self, AuBuffer, Unit};
 use super::Config;
-use crate::rfb::{Closer, Event, Framebuffer, Input, Screen};
+use crate::rfb::{Closer, Event, Framebuffer, Input, RemoteDisplay, Screen};
 use anyhow::{anyhow, bail, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -27,6 +27,8 @@ const ADOPT_AFTER: Duration = Duration::from_secs(2);
 const ADOPT_MIN_PACKETS: u64 = 5;
 const FIR_RETRY: Duration = Duration::from_secs(1);
 const STARTUP_WINDOW: Duration = Duration::from_secs(4);
+/// How long after a display switch a new stream is assumed to be that display.
+const SWITCH_WINDOW: Duration = Duration::from_secs(4);
 
 // ----- startup ------------------------------------------------------------------
 
@@ -221,6 +223,8 @@ struct Layout {
 /// One Mac display within the combined desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Display {
+    /// The Mac's display id (for SetDisplayMessage).
+    id: u32,
     /// In backing pixels.
     pixel: Screen,
     /// In points (the coordinate space pointer events use).
@@ -252,6 +256,10 @@ struct Shared {
     pic_size: (u32, u32),
     /// When the last click or key went out, to log how soon the Mac answers with a picture.
     input_at: Option<Instant>,
+    /// The display the user picked (SetDisplayMessage); `None` = the Mac's choice.
+    selected: Option<u32>,
+    /// A display switch was requested at this time; its stream is adopted at once.
+    switching: Option<(u32, Instant)>,
     dead: Option<String>,
 }
 
@@ -349,7 +357,8 @@ fn parse_layout(p: &[u8]) -> Option<((u32, u32), (u32, u32), Vec<Display>)> {
             (x1 > x0 && y1 > y0).then(|| Screen { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
         };
         if let (Some(point), Some(pixel)) = (rect(o + 20), rect(o + 28)) {
-            displays.push(Display { pixel, point });
+            let id = u32::from_be_bytes([p[o + 16], p[o + 17], p[o + 18], p[o + 19]]);
+            displays.push(Display { id, pixel, point });
         }
     }
     Some((scaled, backing, displays))
@@ -357,25 +366,33 @@ fn parse_layout(p: &[u8]) -> Option<((u32, u32), (u32, u32), Vec<Display>)> {
 
 /// Work out what the decoded picture shows: returns the area of the Mac's pointer
 /// coordinate space (backing pixels of the whole desktop) that pointer events map
-/// into, and the per-monitor rectangles within the picture.
+/// into, the per-monitor rectangles within the picture, and the id of the one
+/// display the picture shows (`None` when it shows the whole desktop).
 ///
 /// With a virtual display the Mac encodes only that display, while the layout
 /// still lists every display (e.g. the MacBook's own panel beside it). A display
 /// whose pixel size equals the picture is that display; otherwise the picture is
 /// the whole desktop, scaled.
-fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32)) -> (Screen, Vec<Screen>) {
+///
+/// A display picked with SetDisplayMessage (`selected`) is always that display:
+/// the Mac scales it into the canvas negotiated at connect time, so its size
+/// need not match (a 6K display arrives in a 5K iMac's 5120x2880 canvas).
+fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32), selected: Option<u32>) -> (Screen, Vec<Screen>, Option<u32>) {
     let (w, h) = pic;
     let Some(l) = layout.filter(|l| l.backing.0 > 0 && l.backing.1 > 0) else {
         let (cw, ch) = if canvas.0 > 0 && canvas.1 > 0 { canvas } else { pic };
-        return (Screen { x: 0, y: 0, w: cw, h: ch }, vec![]);
+        return (Screen { x: 0, y: 0, w: cw, h: ch }, vec![], None);
     };
+    if let Some(d) = selected.and_then(|id| l.displays.iter().find(|d| d.id == id)) {
+        return (d.pixel, vec![], Some(d.id));
+    }
     if l.displays.len() > 1 {
         if let Some(d) = l.displays.iter().rev().find(|d| (d.pixel.w, d.pixel.h) == (w, h)) {
             // Pointer positions go to the display's place in the desktop measured in
             // backing pixels. Verified live on a MacBook (2880x1800 panel) with a 1x
             // virtual display at pixel x=2880: pixel offsets hit the right menu item;
             // point offsets (x=1440) and display-relative positions missed.
-            return (d.pixel, vec![]);
+            return (d.pixel, vec![], Some(d.id));
         }
     }
     let (dw, dh) = l.backing;
@@ -391,7 +408,8 @@ fn picture_geometry(pic: (u32, u32), layout: Option<&Layout>, canvas: (u32, u32)
         .collect::<Vec<_>>();
     // The picture is the whole desktop: pointer positions are its backing pixels
     // (like RFB framebuffer coordinates; ServerInit reports the pixel size too).
-    (Screen { x: 0, y: 0, w: dw, h: dh }, if screens.len() > 1 { screens } else { vec![] })
+    let only = (l.displays.len() == 1).then(|| l.displays[0].id);
+    (Screen { x: 0, y: 0, w: dw, h: dh }, if screens.len() > 1 { screens } else { vec![] }, only)
 }
 
 // ----- threads ----------------------------------------------------------------
@@ -415,13 +433,13 @@ impl Ctx {
 
     fn publish(&self, pic: &Picture, bgra: &mut Vec<u8>, last_size: &mut (u32, u32)) {
         let (w, h) = (pic.width, pic.height);
-        let (area, screens) = {
+        let (area, screens, showing, displays) = {
             let mut sh = self.shared.lock().unwrap();
             sh.last_publish = Instant::now();
             sh.keyframe_wanted = false;
             // Geometry follows the decoded size; monitor rectangles shrink with a halved picture.
             let k = pic.scale.max(1);
-            let mut r = picture_geometry((w * k, h * k), sh.layout.as_ref(), sh.canvas);
+            let mut r = picture_geometry((w * k, h * k), sh.layout.as_ref(), sh.canvas, sh.selected);
             for m in &mut r.1 {
                 *m = Screen { x: m.x / k, y: m.y / k, w: m.w / k, h: m.h / k };
             }
@@ -430,7 +448,8 @@ impl Ctx {
             if let Some(t) = sh.input_at.take() {
                 log::debug!("HP: next picture {} ms after the last click/key was sent", t.elapsed().as_millis());
             }
-            r
+            let displays = sh.layout.as_ref().map_or(vec![], |l| l.displays.iter().map(|d| RemoteDisplay { id: d.id, width: d.pixel.w, height: d.pixel.h }).collect());
+            (r.0, r.1, r.2, displays)
         };
         {
             let mut f = self.fb.lock().unwrap();
@@ -439,10 +458,14 @@ impl Ctx {
             f.height = h;
             f.logical = if (area.w, area.h) == (w, h) || area.w == 0 { (0, 0) } else { (area.w, area.h) };
             f.screens = screens;
+            f.showing = showing;
+            f.displays = displays;
             f.name = self.name.clone();
             f.version += 1;
             f.published = Some(Instant::now());
             f.halved = pic.scale > 1;
+            f.whole_frames = true;
+            f.wake();
         }
         if *last_size != (w, h) {
             *last_size = (w, h);
@@ -639,8 +662,15 @@ fn track(ctx: &Ctx, srtp: &SrtpRx, ssrc: u32, seq: u16) -> bool {
     let now = Instant::now();
     sh.last_packet = Some(now);
     if ssrc != sh.ssrc {
-        if !sh.blacklist.contains(&ssrc) && now - sh.last_publish >= ADOPT_AFTER && srtp.counts.get(&ssrc).copied().unwrap_or(0) >= ADOPT_MIN_PACKETS {
+        // After a requested display switch the new stream is the one we asked for:
+        // adopt it at once instead of waiting for the old pictures to stop.
+        let switching = sh.switching.map_or(false, |(_, t)| now - t < SWITCH_WINDOW);
+        if !sh.blacklist.contains(&ssrc) && (switching || now - sh.last_publish >= ADOPT_AFTER) && srtp.counts.get(&ssrc).copied().unwrap_or(0) >= ADOPT_MIN_PACKETS {
             log::info!("HP: adopting new video stream {ssrc:#010x}");
+            if let Some((id, t)) = sh.switching.take() {
+                log::info!("HP: now showing display {id:#x} ({} ms after asking)", t.elapsed().as_millis());
+                sh.selected = Some(id);
+            }
             let old = sh.ssrc;
             sh.blacklist.insert(old);
             sh.ssrc = ssrc;
@@ -817,6 +847,14 @@ fn tick(ctx: &Ctx, hb: &mut SrtpTx, n: u64) {
     ctx.media.rtcp(&rr);
 
     let now = Instant::now();
+    if let Some((id, t)) = sh.switching {
+        if now - t >= SWITCH_WINDOW {
+            // No new stream came; the Mac switched the existing one (or ignored us).
+            log::info!("HP: no new stream after switching to display {id:#x}; assuming it is shown");
+            sh.switching = None;
+            sh.selected = Some(id);
+        }
+    }
     let flowing = sh.last_packet.map_or(false, |t| now - t < Duration::from_millis(1500));
     if std::mem::take(&mut sh.post_layout_fir) {
         ctx.media.keyframe(&mut sh, true);
@@ -961,6 +999,8 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
             pointer_area: Screen { x: 0, y: 0, w: 0, h: 0 },
             pic_size: (0, 0),
             input_at: None,
+            selected: None,
+            switching: None,
             dead: None,
         }),
         media: Media { ctrl: ctrl.try_clone()?, host: host_ctrl, srtcp: Mutex::new(SrtcpTx::new(&keys.video_v)), our_ssrc: offers.video_ssrc },
@@ -1038,7 +1078,33 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, closer: &Closer, stopping
                     // The same 0x1d message as at connect; mid-session the Mac adds the
                     // display, re-sends its layout and restarts the encoder on it.
                     log::info!("HP: switching to a {width}x{height} virtual display");
+                    {
+                        let mut sh = ctx.shared.lock().unwrap();
+                        sh.selected = None;
+                        sh.switching = None;
+                    }
                     ctx.control.send(&negotiate::virtual_display(width, height))?;
+                }
+                Ok(Input::ShowDisplay(display)) => {
+                    // Over HP the Mac streams one display at a time; "all displays"
+                    // (combine flag) falls back to the main display.
+                    log::info!("HP: asking the Mac to show {}", display.map_or("all displays".to_string(), |d| format!("display {d:#x}")));
+                    {
+                        let mut sh = ctx.shared.lock().unwrap();
+                        let current = sh.switching.map(|s| s.0).or(sh.selected);
+                        if display.is_some() && display == current {
+                            continue;
+                        }
+                        sh.switching = display.map(|d| (d, Instant::now()));
+                        if display.is_none() {
+                            sh.selected = None;
+                        }
+                    }
+                    ctx.control.send(&negotiate::set_display(display))?;
+                    // Like a layout change: re-arm the sender and refresh the picture.
+                    ctx.control.send(&fbu_request(false, 0xffff, 0xffff))?;
+                    let mut sh = ctx.shared.lock().unwrap();
+                    ctx.media.keyframe(&mut sh, true);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
@@ -1106,23 +1172,60 @@ mod tests {
         let (s, b, d) = parse_layout(&p).unwrap();
         assert_eq!((s, b), ((3360, 1080), (4800, 1800)));
         let sc = |x, y, w, h| Screen { x, y, w, h };
-        assert_eq!(d, vec![Display { pixel: sc(0, 0, 2880, 1800), point: sc(0, 0, 1440, 900) }, Display { pixel: sc(2880, 0, 1920, 1080), point: sc(1440, 0, 1920, 1080) }]);
+        assert_eq!(d, vec![Display { id: 0, pixel: sc(0, 0, 2880, 1800), point: sc(0, 0, 1440, 900) }, Display { id: 0, pixel: sc(2880, 0, 1920, 1080), point: sc(1440, 0, 1920, 1080) }]);
 
         // A 1920x1080 picture is the virtual display: pointer at its pixel origin, one monitor.
         let layout = Layout { backing: b, displays: d.clone() };
-        assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080)), (sc(2880, 0, 1920, 1080), vec![]));
+        assert_eq!(picture_geometry((1920, 1080), Some(&layout), (1920, 1080), None), (sc(2880, 0, 1920, 1080), vec![], Some(0)));
         // A picture of the whole desktop maps to all backing pixels and reports both monitors.
-        let (area, screens) = picture_geometry((2400, 900), Some(&layout), (2400, 900));
+        let (area, screens, _) = picture_geometry((2400, 900), Some(&layout), (2400, 900), None);
         assert_eq!(area, sc(0, 0, 4800, 1800));
         assert_eq!(screens, vec![sc(0, 0, 1440, 900), sc(1440, 0, 960, 540)]);
         // The MacBook's own Retina screen alone (no virtual display): pointer positions
         // are its backing pixels, so the picture maps 1:1 (not halved to points).
         let panel = Layout { backing: (2880, 1800), displays: vec![d[0]] };
-        let (area, screens) = picture_geometry((2880, 1800), Some(&panel), (2880, 1800));
+        let (area, screens, _) = picture_geometry((2880, 1800), Some(&panel), (2880, 1800), None);
         assert_eq!((area, screens), (sc(0, 0, 2880, 1800), vec![]));
         assert_eq!(to_logical((2880, 1800), area, 1440, 1624), Some((1440, 1624)));
         // Before any layout: the negotiated canvas.
-        assert_eq!(picture_geometry((1920, 1080), None, (1920, 1080)).0, sc(0, 0, 1920, 1080));
+        assert_eq!(picture_geometry((1920, 1080), None, (1920, 1080), None).0, sc(0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn selected_display_maps_the_whole_picture_onto_it() {
+        // A 5K iMac (id 1) with a 6K display (id 3) to its right. The Mac encodes
+        // into the 5120x2880 canvas it negotiated, whichever display is picked.
+        let sc = |x, y, w, h| Screen { x, y, w, h };
+        let layout = Layout {
+            backing: (11136, 3384),
+            displays: vec![
+                Display { id: 1, pixel: sc(0, 0, 5120, 2880), point: sc(0, 0, 2560, 1440) },
+                Display { id: 3, pixel: sc(5120, 0, 6016, 3384), point: sc(2560, 0, 3008, 1692) },
+            ],
+        };
+        // Nothing picked: the picture's size identifies the main display.
+        assert_eq!(picture_geometry((5120, 2880), Some(&layout), (5120, 2880), None), (sc(0, 0, 5120, 2880), vec![], Some(1)));
+        // The 6K display scaled into the 5K canvas: pointer positions land on it.
+        let (area, screens, showing) = picture_geometry((5120, 2880), Some(&layout), (5120, 2880), Some(3));
+        assert_eq!((area, screens, showing), (sc(5120, 0, 6016, 3384), vec![], Some(3)));
+        // The halved picture's centre is the 6K display's centre.
+        assert_eq!(to_logical((2560, 1440), area, 1280, 720), Some((5120 + 3008, 1692)));
+        // An unknown id falls back to the size match.
+        assert_eq!(picture_geometry((5120, 2880), Some(&layout), (5120, 2880), Some(9)).2, Some(1));
+    }
+
+    #[test]
+    fn layout_records_carry_display_ids() {
+        let mut p = vec![0u8; 20 + 56];
+        p[18..20].copy_from_slice(&1u16.to_be_bytes());
+        p[20 + 16..20 + 20].copy_from_slice(&0x0423_1d5au32.to_be_bytes());
+        for (k, v) in [0u16, 0, 1080, 1920].into_iter().enumerate() {
+            p[20 + 20 + 2 * k..20 + 22 + 2 * k].copy_from_slice(&v.to_be_bytes());
+            p[20 + 28 + 2 * k..20 + 30 + 2 * k].copy_from_slice(&v.to_be_bytes());
+        }
+        let (_, _, d) = parse_layout(&p).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].id, 0x0423_1d5a);
     }
 
     #[test]

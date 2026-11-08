@@ -57,6 +57,28 @@ pub struct Framebuffer {
     /// Apple High Performance: the Mac's screen is 5K or larger, so the picture was
     /// halved for display (and decoding it is expensive).
     pub halved: bool,
+    /// Apple High Performance: every display the Mac has, in its layout order,
+    /// whether or not the current picture shows it.
+    pub displays: Vec<RemoteDisplay>,
+    /// Apple High Performance: the display the picture shows (`None`: the whole
+    /// desktop, or not known).
+    pub showing: Option<u32>,
+    /// Every update replaces the whole picture (Apple High Performance), so the UI
+    /// may take `bgra` instead of copying it; it stays empty until the next update.
+    pub whole_frames: bool,
+    /// Signalled after each complete update, so the UI draws it at once instead
+    /// of on its next periodic check.
+    pub wake: Option<async_channel::Sender<()>>,
+}
+
+/// One of the remote computer's displays (Apple High Performance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteDisplay {
+    /// The Mac's display id (CGDirectDisplayID).
+    pub id: u32,
+    /// Size in backing pixels.
+    pub width: u32,
+    pub height: u32,
 }
 
 impl Framebuffer {
@@ -69,6 +91,13 @@ impl Framebuffer {
             px[3] = 255;
         }
         self.version += 1;
+    }
+
+    /// Tell the UI a complete update is ready.
+    pub fn wake(&self) {
+        if let Some(w) = &self.wake {
+            let _ = w.try_send(());
+        }
     }
 
     /// Number of remote monitors the server reported (at least 1).
@@ -137,6 +166,10 @@ pub enum Input {
     /// Apple High Performance: move the running session onto a virtual display of
     /// this size (in points). Ignored by plain VNC.
     UseVirtualDisplay { width: u32, height: u32 },
+    /// Apple High Performance: stream one of the Mac's displays (`Some(display id)`)
+    /// or all of them combined into one picture (`None`). Ignored by plain VNC,
+    /// which always sends the whole desktop.
+    ShowDisplay(Option<u32>),
 }
 
 /// The input channel as the network side reads it: a run of queued pointer
@@ -298,7 +331,7 @@ fn run(
                     m.extend_from_slice(&keysym.to_be_bytes());
                     m
                 }
-                Input::UseVirtualDisplay { .. } => continue,
+                Input::UseVirtualDisplay { .. } | Input::ShowDisplay(_) => continue,
             };
             if w2.lock().unwrap().write_all(&msg).is_err() {
                 break;
@@ -531,6 +564,7 @@ fn read_loop(
                 }
                 let (w, h) = {
                     let f = fb.lock().unwrap();
+                    f.wake();
                     (f.width, f.height)
                 };
                 request_update(&mut *writer.lock().unwrap(), true, w, h)?;

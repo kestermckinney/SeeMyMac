@@ -39,6 +39,18 @@ impl Status {
 pub struct Tile {
     pub image: Arc<RenderImage>,
     pub size: (u32, u32),
+    /// Which remote monitor this is (0-based).
+    pub monitor: usize,
+    /// False for a snapshot: Apple HP streams one display at a time, so in the
+    /// "Both" view the other display shows its last picture.
+    pub live: bool,
+}
+
+/// Apple HP "Both" view: briefly show a display that has no snapshot yet.
+struct Capture {
+    target: u32,
+    back: Option<u32>,
+    started: Instant,
 }
 
 pub struct Session {
@@ -69,6 +81,22 @@ pub struct Session {
     virtual_offered: bool,
     /// Apple HP: the Mac's screen is 5K or larger (slow to decode; see the banner).
     pub big_screen: bool,
+    /// Apple HP: the session moved to a virtual display (only that one is shown).
+    pub on_virtual: bool,
+    /// Apple HP: the latest picture of each Mac display (by display id); the
+    /// one being streamed is `live`.
+    shots: Vec<(u32, Tile)>,
+    live: Option<u32>,
+    /// Apple HP: the display last asked for, and a snapshot being captured.
+    hp_requested: Option<u32>,
+    capture: Option<Capture>,
+    capture_tried: Vec<u32>,
+    /// Shown over the picture while the Mac switches displays.
+    pub notice: Option<String>,
+    /// Where the shown monitor sits in the remote framebuffer (for pointer events).
+    offset: (u16, u16),
+    /// The connection's multi-monitor preference was applied (once per session).
+    multi_applied: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -128,6 +156,8 @@ pub struct App {
     /// Where closing the connection dialog returns to (the manager, if it opened it).
     pub dialog_return: View,
     hp_check: Option<Arc<Mutex<Option<String>>>>,
+    /// Connection threads signal this when a new picture is ready.
+    wake: async_channel::Sender<()>,
     pub hp_result: Option<String>,
     /// Window-chrome actions taken (also lets tests observe them; the test platform
     /// ignores quit and window moves).
@@ -170,7 +200,9 @@ impl App {
     pub fn with_settings(store: Store, settings: Settings, font: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let (wake, woken) = async_channel::bounded::<()>(1);
         let mut app = Self {
+            wake,
             store,
             settings,
             settings_tab: SettingsTab::General,
@@ -198,8 +230,14 @@ impl App {
             last_input: None,
             _poll: None,
         };
+        // Wake for each new picture (so it is drawn at once, not up to a poll
+        // interval later), and at least every 33 ms for connection events.
         app._poll = Some(cx.spawn_in(window, async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_millis(33)).await;
+            let timer = cx.background_executor().timer(Duration::from_millis(33));
+            futures_lite::future::or(timer, async {
+                let _ = woken.recv().await;
+            })
+            .await;
             if this.update_in(cx, |this, window, cx| this.tick(window, cx)).is_err() {
                 break;
             }
@@ -245,6 +283,15 @@ impl App {
                 virtual_size: (1920, 1080),
                 virtual_offered: false,
                 big_screen: false,
+                on_virtual: false,
+                shots: vec![],
+                live: None,
+                hp_requested: None,
+                capture: None,
+                capture_tried: vec![],
+                notice: None,
+                offset: (0, 0),
+                multi_applied: false,
             };
             self.sessions.insert(id.to_string(), session);
             self.begin_login(id, window, cx);
@@ -307,7 +354,12 @@ impl App {
         s.virtual_pending = None;
         s.virtual_offered = false;
         s.big_screen = false;
-        
+        s.on_virtual = false;
+        s.hp_requested = None;
+        s.capture = None;
+        s.capture_tried.clear();
+        s.notice = None;
+
         let handle = match conn.proto {
             Proto::Apple => {
                 // Size advertised for the virtual display.
@@ -330,6 +382,7 @@ impl App {
             _ => rfb::connect(rfb::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone() }),
         };
         
+        handle.fb.lock().unwrap().wake = Some(self.wake.clone());
         s.handle = Some(handle);
     }
 
@@ -345,7 +398,7 @@ impl App {
 
     fn release_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(mut s) = self.sessions.remove(id) {
-            for t in s.tiles.drain(..) {
+            for t in s.tiles.drain(..).chain(s.shots.drain(..).map(|(_, t)| t)) {
                 cx.drop_image(t.image, Some(window));
             }
             // Dropping the handle shuts the socket.
@@ -375,7 +428,6 @@ impl App {
         let mut prompt: Option<(String, String)> = None;
         for id in ids {
             let active = self.st.active.as_deref() == Some(id.as_str());
-            let mon = self.st.monitor(&id);
             let conn = self.store.get(&id).cloned();
             let Some(s) = self.sessions.get_mut(&id) else { continue };
 
@@ -447,39 +499,61 @@ impl App {
                 continue;
             }
             let due = active || s.last_build.elapsed() > Duration::from_secs(1);
-            let (version, monitors) = {
+            let (version, monitors, displays) = {
                 let f = h.fb.lock().unwrap();
-                (f.version, f.monitors())
+                // Apple HP lists the Mac's displays (one is streamed at a time); VNC
+                // reports the monitors within its whole-desktop framebuffer.
+                let n = if f.displays.is_empty() { f.monitors() } else if s.on_virtual { 1 } else { f.displays.len() as u32 };
+                (f.version, n, f.displays.clone())
             };
             if monitors != s.monitors {
+                // "Side by side" connections open on the "Both" view.
+                if monitors > 1 && !s.multi_applied {
+                    s.multi_applied = true;
+                    if conn.as_ref().map_or(false, |c| c.multi_monitor == model::MultiMonitor::SideBySide) {
+                        self.st.set_monitor(&id, Mon::All, monitors);
+                    }
+                }
                 s.monitors = monitors;
                 if let Some(c) = self.store.get_mut(&id) {
                     c.monitors = monitors;
                 }
                 changed = true;
             }
+            let mon = self.st.monitor(&id);
             let eff_mon = if active { mon } else { Mon::One };
-            if due && (version != s.seen_version || s.seen_mon != Some(eff_mon) || s.tiles.is_empty()) {
+            let mut retired = vec![];
+            if !displays.is_empty() {
+                // The handle is lent out so the refresh can update the session too.
+                if let Some(h) = s.handle.take() {
+                    changed |= hp_refresh(s, &h, &displays, version, due, active, eff_mon, self.last_input, &mut retired);
+                    s.handle = Some(h);
+                }
+            } else if due && (version != s.seen_version || s.seen_mon != Some(eff_mon) || s.tiles.is_empty()) {
                 let t0 = Instant::now();
                 let arrived;
                 let tiles = {
                     let f = h.fb.lock().unwrap();
                     arrived = f.published;
                     s.size = (f.width, f.height);
-                    let rects: Vec<geometry_screen::Screen> = match (eff_mon, f.screens.len()) {
-                        (Mon::All, n) if n > 1 => (0..n).map(|i| f.monitor_rect(i)).collect(),
-                        (Mon::Two, n) if n > 1 => vec![f.monitor_rect(1)],
-                        (_, n) if n > 1 => vec![f.monitor_rect(0)],
-                        _ => vec![f.monitor_rect(usize::MAX)],
+                    let n = f.screens.len();
+                    let rects: Vec<(usize, geometry_screen::Screen)> = match (eff_mon, n) {
+                        (Mon::All, n) if n > 1 => (0..n).map(|i| (i, f.monitor_rect(i))).collect(),
+                        (Mon::Two, n) if n > 1 => vec![(1, f.monitor_rect(1))],
+                        (_, n) if n > 1 => vec![(0, f.monitor_rect(0))],
+                        _ => vec![(0, f.monitor_rect(usize::MAX))],
                     };
-                    rects
-                        .into_iter()
-                        .filter_map(|r| make_image(r.w, r.h, f.crop(r)).map(|image| Tile { image, size: (r.w, r.h) }))
-                        .collect::<Vec<_>>()
+                    s.offset = rects.first().map_or((0, 0), |(_, r)| (r.x as u16, r.y as u16));
+                    if f.bgra.len() < (f.width * f.height * 4) as usize {
+                        vec![] // nothing received yet
+                    } else {
+                        rects
+                            .into_iter()
+                            .filter_map(|(monitor, r)| make_image(r.w, r.h, f.crop(r)).map(|image| Tile { image, size: (r.w, r.h), monitor, live: true }))
+                            .collect::<Vec<_>>()
+                    }
                 };
-                for old in std::mem::replace(&mut s.tiles, tiles) {
-                    cx.drop_image(old.image, Some(window));
-                }
+                retired.extend(std::mem::replace(&mut s.tiles, tiles).into_iter().map(|t| t.image));
                 if let (Some(a), Some(i)) = (arrived, self.last_input) {
                     if i.elapsed() < Duration::from_secs(1) {
                         log::debug!("UI: picture ready to draw {} ms after it arrived (copy took {} ms)", a.elapsed().as_millis(), t0.elapsed().as_millis());
@@ -489,6 +563,9 @@ impl App {
                 s.seen_mon = Some(eff_mon);
                 s.last_build = Instant::now();
                 changed = true;
+            }
+            for image in retired {
+                cx.drop_image(image, Some(window));
             }
         }
         if let Some(slot) = &self.hp_check {
@@ -782,6 +859,9 @@ impl App {
         }
         if let (Some((width, height)), Some(h)) = (s.virtual_pending.take(), &s.handle) {
             h.send(Input::UseVirtualDisplay { width, height });
+            s.on_virtual = true;
+            s.hp_requested = None;
+            s.capture = None;
             cx.notify();
         }
     }
@@ -1065,18 +1145,9 @@ impl App {
         if let (Some(b), Some(d)) = (buttons, down) {
             log::debug!("click: button {b} {} at remote {x},{y}", if d { "down" } else { "up" });
         }
-        // Offset into the selected monitor within the whole framebuffer.
-        let (ox, oy) = match (self.st.active.as_deref().map(|id| self.st.monitor(id)), s.handle.as_ref()) {
-            (Some(Mon::Two), Some(h)) => {
-                let r = h.fb.lock().unwrap().monitor_rect(1);
-                (r.x as u16, r.y as u16)
-            }
-            (Some(Mon::One), Some(h)) => {
-                let r = h.fb.lock().unwrap().monitor_rect(0);
-                (r.x as u16, r.y as u16)
-            }
-            _ => (0, 0),
-        };
+        // Offset into the shown monitor within the whole framebuffer (worked out
+        // when the picture was built, so mouse moves never wait on its lock).
+        let (ox, oy) = s.offset;
         if let (Some(mask), Some(d)) = (buttons, down) {
             self.last_input = Some(Instant::now());
             if d {
@@ -1098,9 +1169,9 @@ impl App {
         let b = self.buttons;
         if let Some(s) = self.active_session() {
             if let (Some(h), Some(t)) = (&s.handle, s.tiles.first()) {
-                let _ = t;
                 let area = self.area.get();
                 let (x, y) = geometry::to_remote(f32::from(area.size.width), f32::from(area.size.height), t.size.0, t.size.1, s.scaling, f32::from(pos.x - area.origin.x), f32::from(pos.y - area.origin.y)).unwrap_or((0, 0));
+                let (x, y) = (x + s.offset.0, y + s.offset.1);
                 h.send(Input::Pointer { x, y, buttons: b | mask });
                 h.send(Input::Pointer { x, y, buttons: b });
             }
@@ -1131,6 +1202,109 @@ impl App {
             }
         }
     }
+}
+
+/// Apple HP picture refresh. The Mac streams one display at a time, so the picture
+/// is always a whole display: take it from the framebuffer (no copy), keep it as
+/// that display's snapshot, ask the Mac for the display the user picked, and for
+/// "Both" show the live display beside the other's latest snapshot (capturing
+/// one first if there is none). Returns whether anything visible changed; images
+/// no longer shown are pushed to `retired`.
+#[allow(clippy::too_many_arguments)]
+fn hp_refresh(s: &mut Session, h: &rfb::Handle, displays: &[rfb::RemoteDisplay], version: u64, due: bool, active: bool, mon: Mon, last_input: Option<Instant>, retired: &mut Vec<Arc<RenderImage>>) -> bool {
+    let mut changed = false;
+    let mut fresh = None;
+    if due && version != s.seen_version {
+        let t0 = Instant::now();
+        let (frame, showing, arrived) = {
+            let mut f = h.fb.lock().unwrap();
+            let (w, ht) = (f.width, f.height);
+            let bgra = if f.whole_frames { std::mem::take(&mut f.bgra) } else { f.crop(f.monitor_rect(usize::MAX)) };
+            s.seen_version = f.version;
+            let ok = w > 0 && bgra.len() == (w * ht * 4) as usize;
+            (ok.then(|| make_image(w, ht, bgra).map(|image| (image, (w, ht)))).flatten(), f.showing, f.published)
+        };
+        if let Some((image, size)) = frame {
+            s.size = size;
+            let key = showing.unwrap_or(0);
+            let monitor = displays.iter().position(|d| d.id == key).unwrap_or(0);
+            let tile = Tile { image, size, monitor, live: true };
+            match s.shots.iter_mut().find(|(d, _)| *d == key) {
+                Some(e) => retired.push(std::mem::replace(&mut e.1, tile).image),
+                None => s.shots.push((key, tile)),
+            }
+            s.live = Some(key);
+            fresh = Some(key);
+            if let (Some(a), Some(i)) = (arrived, last_input) {
+                if i.elapsed() < Duration::from_secs(1) {
+                    log::debug!("UI: picture ready to draw {} ms after it arrived (hand-off took {} ms)", a.elapsed().as_millis(), t0.elapsed().as_millis());
+                }
+            }
+        }
+    }
+
+    // Which display the Mac should stream (only for the session on screen).
+    let multi = !s.on_virtual && displays.len() > 1;
+    if multi && active {
+        let ids: Vec<u32> = displays.iter().take(2).map(|d| d.id).collect();
+        let current = s.hp_requested.or(s.live);
+        let mut ask = None;
+        if let Some(c) = &s.capture {
+            if fresh == Some(c.target) || c.started.elapsed() > Duration::from_secs(6) {
+                ask = c.back.or(ids.first().copied());
+                s.capture = None;
+            }
+        } else {
+            match mon {
+                Mon::One | Mon::Two => {
+                    let want = ids[if mon == Mon::Two { 1 } else { 0 }];
+                    if current != Some(want) {
+                        ask = Some(want);
+                    }
+                }
+                Mon::All => {
+                    let missing = ids.iter().copied().find(|d| !s.shots.iter().any(|(x, _)| x == d) && !s.capture_tried.contains(d));
+                    if let Some(target) = missing {
+                        s.capture_tried.push(target);
+                        s.capture = Some(Capture { target, back: current, started: Instant::now() });
+                        ask = Some(target);
+                    }
+                }
+            }
+        }
+        if let Some(d) = ask {
+            h.send(Input::ShowDisplay(Some(d)));
+            s.hp_requested = Some(d);
+            changed = true;
+        }
+    }
+    let name = |id: u32| format!("Monitor {}", displays.iter().position(|d| d.id == id).map_or(1, |i| i + 1));
+    let notice = match (&s.capture, s.hp_requested) {
+        (Some(c), _) => Some(format!("Capturing {} for the side-by-side view…", name(c.target))),
+        (None, Some(want)) if multi && active && s.live != Some(want) => Some(format!("Switching to {}…", name(want))),
+        _ => None,
+    };
+    if notice != s.notice {
+        s.notice = notice;
+        changed = true;
+    }
+
+    // Compose what is drawn: the live display, or for "Both" one per display.
+    if fresh.is_some() || s.seen_mon != Some(mon) || (s.tiles.is_empty() && !s.shots.is_empty()) {
+        let tile = |id: u32, monitor: usize| s.shots.iter().find(|(x, _)| *x == id).map(|(_, t)| Tile { image: t.image.clone(), size: t.size, monitor, live: s.live == Some(id) });
+        let tiles: Vec<Tile> = if mon == Mon::All && multi {
+            displays.iter().take(2).enumerate().filter_map(|(i, d)| tile(d.id, i)).collect()
+        } else {
+            s.live.and_then(|id| tile(id, displays.iter().position(|d| d.id == id).unwrap_or(0))).into_iter().collect()
+        };
+        // The images belong to `shots`; only replaced snapshots are retired.
+        s.tiles = tiles;
+        s.offset = (0, 0); // the HP session maps pointer positions onto the shown display
+        s.seen_mon = Some(mon);
+        s.last_build = Instant::now();
+        changed = true;
+    }
+    changed
 }
 
 /// Local alias so `app.rs` need not import the type with a long path.

@@ -31,14 +31,23 @@ hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 plist = "1"
 socket2 = "0.5"
+# Wakes the UI as soon as a new remote picture is ready (instead of polling).
+async-channel = "2"
+futures-lite = "2"
 
 [profile.dev.package.see_my_mac]
 # Frame conversion runs per pixel; unoptimised code is far too slow for live video.
 opt-level = 3
 
-[profile.dev.package.rust_h264]
-# Live H.264 decoding needs an optimised decoder even in debug builds.
+[profile.dev.package."*"]
+# Every dependency optimised, without debug assertions or overflow checks, even
+# in debug builds: otherwise rust_h265 (which also checks every shared-table
+# access when debug assertions are on) decodes so slowly that video falls
+# seconds behind, and gpui's texture uploads and layout are much slower too.
+# This crate keeps its checks; debug info is unchanged.
 opt-level = 3
+debug-assertions = false
+overflow-checks = false
 
 [profile.dev]
 opt-level = 0

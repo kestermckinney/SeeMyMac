@@ -6,6 +6,12 @@
 //! or, using a connection saved in SeeMyMac with its password in the keyring:
 //!
 //!   cargo run --release --bin hp_probe -- @c4 [seconds]
+//!
+//! SEEMYMAC_NO_VIRTUAL=1 streams the Mac's own screen instead of a virtual display
+//! (SEEMYMAC_PROBE_W / SEEMYMAC_PROBE_H size that display). SEEMYMAC_PROBE_POINTER
+//! scripts steps 2 s apart: "x,y" moves, "x,y,c" clicks, "esc", "k:HEX" taps a
+//! keysym, and "disp:N" / "disp:all" asks the Mac to stream display N (0-based) or
+//! all of them.
 
 use see_my_mac::hp;
 use see_my_mac::rfb::Event;
@@ -40,8 +46,8 @@ fn main() {
         port: 5900,
         username,
         password,
-        width: 1920,
-        height: 1080,
+        width: std::env::var("SEEMYMAC_PROBE_W").ok().and_then(|v| v.parse().ok()).unwrap_or(1920),
+        height: std::env::var("SEEMYMAC_PROBE_H").ok().and_then(|v| v.parse().ok()).unwrap_or(1080),
         virtual_display: std::env::var_os("SEEMYMAC_NO_VIRTUAL").is_none(),
         demo: false,
     };
@@ -58,6 +64,10 @@ fn main() {
         .filter_map(|p| {
             if p.trim() == "esc" {
                 return Some((0, 0, "esc"));
+            }
+            if let Some(d) = p.trim().strip_prefix("disp:") {
+                // "disp:all" shows every display combined; "disp:N" display N (0-based).
+                return Some((if d == "all" { u16::MAX } else { d.parse().ok()? }, 0, "disp"));
             }
             if let Some(k) = p.trim().strip_prefix("kd:") {
                 return Some((u16::from_str_radix(k, 16).ok()?, 0, "keydown"));
@@ -77,6 +87,7 @@ fn main() {
     let mut move_idx = 0;
     let mut last_version = 0;
     let mut frames = 0u64;
+    let mut last_geo = (0, 0, None);
     while Instant::now() < end {
         match h.events.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Disconnected(r)) => {
@@ -107,7 +118,12 @@ fn main() {
                 }
                 if let Some(&(x, y, what)) = moves.get(move_idx) {
                     use see_my_mac::rfb::Input;
-                    if what == "keydown" || what == "keyup" {
+                    if what == "disp" {
+                        let displays = h.fb.lock().unwrap().displays.clone();
+                        let id = (x != u16::MAX).then(|| displays.get(x as usize).map_or(x as u32, |d| d.id));
+                        println!("[{:6.2}s] show display {id:?} (displays {displays:?})", t0.elapsed().as_secs_f32());
+                        h.send(Input::ShowDisplay(id));
+                    } else if what == "keydown" || what == "keyup" {
                         println!("[{:6.2}s] {what} {x:#x}", t0.elapsed().as_secs_f32());
                         h.send(Input::Key { keysym: x as u32, down: what == "keydown" });
                     } else if what == "key" {
@@ -148,9 +164,14 @@ fn main() {
                 }
                 let _ = std::fs::write(std::path::Path::new(&dir).join(format!("frame{frames}.ppm")), ppm);
             }
+            let geo = (f.width, f.height, f.showing);
+            if geo != last_geo {
+                last_geo = geo;
+                println!("[{:6.2}s] picture now {}x{} logical {:?} showing {:?} screens {:?}", t0.elapsed().as_secs_f32(), f.width, f.height, f.logical, f.showing, f.screens);
+            }
             if frames == 1 || frames % 60 == 0 {
                 let mean = f.bgra.iter().step_by(97).map(|&b| b as u64).sum::<u64>() / (f.bgra.len() as u64 / 97).max(1);
-                println!("[{:6.2}s] frame #{frames} {}x{} logical {:?} mean {mean}", t0.elapsed().as_secs_f32(), f.width, f.height, f.logical);
+                println!("[{:6.2}s] frame #{frames} {}x{} logical {:?} showing {:?} screens {:?} mean {mean}", t0.elapsed().as_secs_f32(), f.width, f.height, f.logical, f.showing, f.screens);
             }
         }
     }

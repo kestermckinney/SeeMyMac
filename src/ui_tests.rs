@@ -486,6 +486,74 @@ fn apple_hp_session_streams_from_the_synthetic_source(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |a, _| a.st.no_sessions()));
 }
 
+/// Apple HP streams one Mac display at a time: picking a monitor asks the Mac to
+/// switch, and "Both" shows the live display beside a snapshot of the other
+/// (captured by briefly switching to it). The synthetic source plays the Mac.
+#[gpui::test]
+fn apple_hp_monitors_switch_the_stream_and_both_shows_a_snapshot(cx: &mut TestAppContext) {
+    std::env::set_var("SEEMYMAC_DEMO", "1");
+    let mut store = Store::load(None);
+    let mut c = Connection::blank("hp2".into());
+    c.host = "two-displays.invalid".into();
+    c.credentials = CredentialMode::Ask;
+    c.resolution = crate::model::Resolution::Hd;
+    store.upsert(c);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
+    open_and_login(cx, &view, "hp2");
+    tick_until(cx, &view, "two HP displays", |a| a.sessions["hp2"].monitors == 2 && !a.sessions["hp2"].tiles.is_empty());
+    std::env::remove_var("SEEMYMAC_DEMO");
+    view.update(cx, |a, _| a.st.pinned = true);
+    draw(cx);
+    // The first picture is the Mac's main display, shown live.
+    let green = |a: &App| {
+        let t = &a.sessions["hp2"].tiles[0];
+        (t.monitor, t.live)
+    };
+    assert_eq!(view.read_with(cx, |a, _| green(a)), (0, true));
+
+    // Monitor 2: the Mac is asked to stream display 2; a notice shows meanwhile.
+    cx.simulate_keystrokes("ctrl-alt-pagedown");
+    tick_until(cx, &view, "monitor 2 streaming", |a| a.sessions["hp2"].tiles.len() == 1 && a.sessions["hp2"].tiles[0].monitor == 1);
+    tick_until(cx, &view, "notice cleared", |a| a.sessions["hp2"].notice.is_none());
+    draw(cx);
+
+    // Both: display 2 is live, display 1 is the snapshot taken before the switch.
+    cx.simulate_keystrokes("ctrl-alt-home");
+    tick_until(cx, &view, "both tiles", |a| a.sessions["hp2"].tiles.len() == 2);
+    let tiles = view.read_with(cx, |a, _| a.sessions["hp2"].tiles.iter().map(|t| (t.monitor, t.live)).collect::<Vec<_>>());
+    assert_eq!(tiles, vec![(0, false), (1, true)]);
+    draw(cx);
+
+    // Clicking monitor 1 in the "Both" view zooms in and streams it live again.
+    view.update(cx, |a, _| a.st.zoom_into("hp2", Mon::One));
+    tick_until(cx, &view, "monitor 1 live", |a| a.sessions["hp2"].tiles.len() == 1 && a.sessions["hp2"].tiles[0].monitor == 0 && a.sessions["hp2"].tiles[0].live);
+    cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("hp2", window, cx)));
+}
+
+/// Opening "Both" before the other display was ever shown captures it first.
+#[gpui::test]
+fn apple_hp_both_view_captures_a_display_never_shown(cx: &mut TestAppContext) {
+    std::env::set_var("SEEMYMAC_DEMO", "1");
+    let mut store = Store::load(None);
+    let mut c = Connection::blank("hp3".into());
+    c.host = "two-displays.invalid".into();
+    c.credentials = CredentialMode::Ask;
+    c.resolution = crate::model::Resolution::Hd;
+    c.multi_monitor = crate::model::MultiMonitor::SideBySide;
+    store.upsert(c);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
+    open_and_login(cx, &view, "hp3");
+    tick_until(cx, &view, "two HP displays", |a| a.sessions["hp3"].monitors == 2);
+    std::env::remove_var("SEEMYMAC_DEMO");
+    assert_eq!(view.read_with(cx, |a, _| a.st.monitor("hp3")), Mon::All, "side-by-side connections open on Both");
+    tick_until(cx, &view, "both tiles after capturing display 2", |a| a.sessions["hp3"].tiles.len() == 2 && a.sessions["hp3"].notice.is_none());
+    // Back on the main display, which is live; display 2 is the captured snapshot.
+    tick_until(cx, &view, "main display live again", |a| a.sessions["hp3"].tiles.iter().map(|t| (t.monitor, t.live)).collect::<Vec<_>>() == vec![(0, true), (1, false)]);
+    view.update(cx, |a, _| a.st.pinned = true);
+    draw(cx);
+    cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("hp3", window, cx)));
+}
+
 /// A virtual-display Apple HP session starts on the Mac's own screen with a banner
 /// offering the switch; switching clears it (the demo source ignores the command).
 #[gpui::test]

@@ -22,7 +22,7 @@ pub mod offers;
 pub mod rtp;
 mod session;
 
-use crate::rfb::{Closer, Event, Framebuffer, Handle, Input, Screen};
+use crate::rfb::{Closer, Event, Framebuffer, Handle, Input, RemoteDisplay, Screen};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -81,10 +81,14 @@ pub fn self_test() -> String {
     decode::self_test().unwrap_or_else(|e| format!("{e:#}"))
 }
 
-/// A moving test pattern at 60 fps, for UI tests and demos.
+/// A moving test pattern at 60 fps, for UI tests and demos. A host name starting
+/// with "two-displays" acts like a Mac with two displays (ids 1 and 2) that
+/// streams one at a time, as Apple HP does; display 2's picture is tinted green.
 fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input: Receiver<Input>, events: &Sender<Event>) -> anyhow::Result<()> {
     let (w, h) = (cfg.width.max(64), cfg.height.max(64));
     let two = std::env::var("SEEMYMAC_DEMO_DISPLAYS").as_deref() == Ok("2");
+    let hp_two = cfg.host.starts_with("two-displays");
+    let mut showing = 1u32;
     let _ = events.send(Event::Stage("Starting the synthetic Apple High Performance source…".into()));
     let mut base = vec![0u8; (w * h * 4) as usize];
     for (i, px) in base.chunks_exact_mut(4).enumerate() {
@@ -95,6 +99,7 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
     let mut next = Instant::now();
     while !stopping.load(Ordering::SeqCst) {
         match input.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            Ok(Input::ShowDisplay(Some(id))) if hp_two && (id == 1 || id == 2) => showing = id,
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
@@ -103,6 +108,11 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
         }
         next += Duration::from_millis(16);
         let mut img = base.clone();
+        if showing == 2 {
+            for px in img.chunks_exact_mut(4) {
+                px[1] = 255;
+            }
+        }
         let left = (n * 13) % (w - 100).max(1);
         for y in h / 3..(h / 3 + 100.min(h / 3)) {
             for x in left..(left + 100).min(w) {
@@ -118,7 +128,13 @@ fn demo(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &AtomicBool, input
             f.logical = (0, 0);
             f.name = "Synthetic Mac".into();
             f.screens = if two { vec![Screen { x: 0, y: 0, w: w / 2, h }, Screen { x: w / 2, y: 0, w: w - w / 2, h }] } else { vec![] };
+            if hp_two {
+                f.displays = vec![RemoteDisplay { id: 1, width: w, height: h }, RemoteDisplay { id: 2, width: w, height: h }];
+                f.showing = Some(showing);
+                f.whole_frames = true;
+            }
             f.version += 1;
+            f.wake();
         }
         if n == 0 {
             let _ = events.send(Event::Connected { width: w, height: h, name: "Synthetic Mac".into() });

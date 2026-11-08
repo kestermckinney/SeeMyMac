@@ -474,7 +474,9 @@ impl App {
                     let tile_w = ((aw - 16.0 - 8.0 * (n - 1.0)) / n).max(1.0);
                     let mut row = div().size_full().flex().items_center().justify_center().gap(px(8.0)).p(px(8.0)).bg(rgb(BG_TITLE));
                     for (i, t) in s.tiles.iter().enumerate() {
-                        let zoom = if i == 0 { Mon::One } else { Mon::Two };
+                        let zoom = if t.monitor == 0 { Mon::One } else { Mon::Two };
+                        // Apple HP streams one display at a time: the other is its last picture.
+                        let state = if t.live { "" } else { " · snapshot, click to show live" };
                         let zid = id.clone();
                         row = row.child(
                             div()
@@ -494,7 +496,7 @@ impl App {
                                         .rounded(px(4.0))
                                         .bg(rgba(0x000000B3))
                                         .text_size(px(12.0))
-                                        .child(format!("Monitor {} · {} × {}", i + 1, t.size.0, t.size.1)),
+                                        .child(format!("Monitor {} · {} × {}{state}", t.monitor + 1, t.size.0, t.size.1)),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.st.zoom_into(&zid, zoom);
@@ -1001,6 +1003,23 @@ impl Render for App {
             }))
             .child(content)
             .when(!self.st.pinned, |d| d.child(self.pull_tab(cx)))
+            .when_some(self.active_session().and_then(|s| s.notice.clone()), |d, text| {
+                d.child(
+                    div().absolute().top(px(PULL_H + 12.0)).left_0().right_0().flex().justify_center().child(
+                        div()
+                            .id("monitor-notice")
+                            .debug_selector(|| "monitor-notice".into())
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(0x0D1117E6))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(12.0))
+                            .child(text),
+                    ),
+                )
+            })
             .when(view == View::Idle && self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| d.child(self.virtual_banner(cx)))
             .when(view == View::Menu, |d| {
                 d.child(
