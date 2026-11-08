@@ -38,7 +38,8 @@ fn fake_mac(w: u16, h: u16, two_monitors: bool) -> (u16, std::sync::mpsc::Receiv
         let mut hdr = [0u8; 4];
         s.read_exact(&mut hdr).unwrap();
         let n = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
-        let mut e = vec![0u8; n * 4 + 10];
+        // Encodings, Apple's ViewerInfo (66) and AutoPasteboard (8), the update request (10).
+        let mut e = vec![0u8; n * 4 + 66 + 8 + 10];
         s.read_exact(&mut e).unwrap();
         let mut m = vec![0, 0];
         m.extend((1 + two_monitors as u16).to_be_bytes());
@@ -986,4 +987,48 @@ fn live_apple_hp_typing_reaches_the_mac(cx: &mut TestAppContext) {
         pump(cx, 0.1);
     }
     cx.update(|window, cx| view.update(cx, |a, cx| a.close_session(id, window, cx)));
+}
+
+/// This PC's clipboard text reaches a Mac VNC session (as Apple's 0x1f, so every
+/// character survives) once, not again on every poll.
+#[gpui::test]
+fn local_clipboard_text_is_sent_to_the_session_once(cx: &mut TestAppContext) {
+    use crate::hp::clipboard::{text, MSG_SEND};
+    let (port, rx) = fake_mac(64, 36, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected", |a| a.sessions["c1"].status == Status::Connected);
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("copied ✓\r\nhere".into())));
+    let texts = |all: &[u8]| -> Vec<String> {
+        (0..all.len()).filter(|&i| all[i] == MSG_SEND && i + 16 <= all.len()).filter_map(|i| {
+            let n = u32::from_be_bytes(all[i + 12..i + 16].try_into().unwrap()) as usize;
+            all.get(i..i + 16 + n).and_then(text)
+        }).collect()
+    };
+    // The clipboard is only read while the window has focus.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(cx.update(|window, _| window.is_window_active()));
+    let end = Instant::now() + Duration::from_secs(5);
+    let mut all = vec![];
+    while texts(&all).is_empty() {
+        assert!(Instant::now() < end, "clipboard text never reached the server");
+        cx.update(|window, cx| view.update(cx, |app, cx| app.tick(window, cx)));
+        while let Ok(v) = rx.try_recv() {
+            all = v;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(texts(&all), ["copied ✓\nhere"], "sent with Unix line endings");
+    // Unchanged clipboard: nothing more is sent over the next few polls.
+    let end = Instant::now() + Duration::from_millis(1800);
+    while Instant::now() < end {
+        cx.update(|window, cx| view.update(cx, |app, cx| app.tick(window, cx)));
+        while let Ok(v) = rx.try_recv() {
+            all = v;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(texts(&all).len(), 1, "sent once");
+    cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("c1", window, cx)));
 }

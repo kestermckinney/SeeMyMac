@@ -11,7 +11,9 @@
 //! (SEEMYMAC_PROBE_W / SEEMYMAC_PROBE_H size that display). SEEMYMAC_PROBE_POINTER
 //! scripts steps 2 s apart: "x,y" moves, "x,y,c" clicks, "esc", "k:HEX" taps a
 //! keysym, and "disp:N" / "disp:all" asks the Mac to stream display N (0-based) or
-//! all of them.
+//! all of them. SEEMYMAC_PROBE_CLIP="text" puts that text on the Mac's clipboard
+//! 2 s after the first picture; the Mac's clipboard is reported (as a length, and
+//! whether it matches) whenever it changes.
 
 use see_my_mac::hp;
 use see_my_mac::rfb::Event;
@@ -89,12 +91,23 @@ fn main() {
     let mut last_version = 0;
     let mut frames = 0u64;
     let mut last_geo = (0, 0, None);
+    let clip = std::env::var("SEEMYMAC_PROBE_CLIP").ok();
+    let mut clip_sent = false;
     while Instant::now() < end {
+        if let (Some(t), Some(t1), false) = (&clip, first_frame_at, clip_sent) {
+            if t1.elapsed() >= Duration::from_secs(2) {
+                clip_sent = true;
+                println!("[{:6.2}s] clipboard -> Mac: {} characters", t0.elapsed().as_secs_f32(), t.chars().count());
+                h.send(see_my_mac::rfb::Input::Clipboard(t.clone()));
+            }
+        }
         match h.events.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Disconnected(r)) => {
                 println!("[{:6.2}s] DISCONNECTED: {r:?}", t0.elapsed().as_secs_f32());
                 return;
             }
+            // The text itself is not printed: it may be something private.
+            Ok(Event::ServerClipboard(t)) => println!("[{:6.2}s] clipboard <- Mac: {} characters{}", t0.elapsed().as_secs_f32(), t.chars().count(), if clip.as_deref() == Some(t.as_str()) { ", matches what was sent" } else { "" }),
             Ok(e) => println!("[{:6.2}s] {e:?}", t0.elapsed().as_secs_f32()),
             Err(_) => {}
         }

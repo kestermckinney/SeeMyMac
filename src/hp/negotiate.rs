@@ -31,7 +31,9 @@ pub fn set_encodings() -> Vec<u8> {
     m
 }
 
-fn viewer_info() -> Vec<u8> {
+/// 0x21 ViewerInfo: protocol and OS versions, and the command mask whose bits turn
+/// on the Mac's optional pushes (status heartbeats and pasteboard changes among them).
+pub fn viewer_info_message() -> Vec<u8> {
     let mut m = vec![0x21, 0];
     m.extend_from_slice(&0x3eu16.to_be_bytes());
     m.extend_from_slice(&1u16.to_be_bytes());
@@ -45,6 +47,11 @@ fn viewer_info() -> Vec<u8> {
     mask[4] = 0x90;
     mask[10] = 0x40;
     m.extend_from_slice(&mask);
+    m
+}
+
+fn viewer_info() -> Vec<u8> {
+    let mut m = viewer_info_message();
     // Apple's plaintext 0x12 follow-up; all-zero values fail the handshake.
     m.extend_from_slice(&[0x12, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1]);
     m

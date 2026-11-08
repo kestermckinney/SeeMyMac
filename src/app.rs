@@ -86,6 +86,9 @@ pub struct Session {
     offset: (u16, u16),
     /// The connection's multi-monitor preference was applied (once per session).
     multi_applied: bool,
+    /// The clipboard text both sides last agreed on (sent there or received from
+    /// there), so a change is sent once and the remote's own text is not echoed.
+    clip_synced: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -169,6 +172,8 @@ pub struct App {
     pub buttons: u8,
     /// Last key press or click forwarded, to log display latency right after it.
     last_input: Option<Instant>,
+    /// When this PC's clipboard was last checked for text to send.
+    clip_checked: Instant,
     _poll: Option<Task<()>>,
 }
 
@@ -241,6 +246,7 @@ impl App {
             held_mods: Modifiers::default(),
             buttons: 0,
             last_input: None,
+            clip_checked: Instant::now(),
             _poll: None,
         };
         // Wake for each new picture (so it is drawn at once, not up to a poll
@@ -302,6 +308,7 @@ impl App {
                 pointer_target: 0,
                 offset: (0, 0),
                 multi_applied: false,
+                clip_synced: None,
             };
             self.sessions.insert(id.to_string(), session);
             self.begin_login(id, window, cx);
@@ -431,7 +438,32 @@ impl App {
     }
 
     /// Per-frame housekeeping: network events, reconnects and image refresh.
+    /// Send this PC's clipboard text to the active session when it changes. There is
+    /// no change notification, so it is polled, only while this window has focus
+    /// (Wayland only lets a focused window read the clipboard).
+    fn sync_clipboard(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.clip_checked.elapsed() < CLIPBOARD_POLL || !window.is_window_active() {
+            return;
+        }
+        self.clip_checked = Instant::now();
+        let Some(id) = self.st.active.clone() else { return };
+        if !self.store.get(&id).map_or(false, |c| c.local.clipboard) {
+            return;
+        }
+        let Some(s) = self.sessions.get_mut(&id).filter(|s| s.status == Status::Connected) else { return };
+        let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()).filter(|t| !t.is_empty()) else { return };
+        if s.clip_synced.as_deref().map_or(false, |c| same_clip(c, &text)) {
+            return;
+        }
+        if let Some(h) = &s.handle {
+            // Macs and VNC servers expect Unix line endings.
+            h.send(Input::Clipboard(text.replace("\r\n", "\n")));
+            s.clip_synced = Some(text);
+        }
+    }
+
     pub(crate) fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_clipboard(window, cx);
         let mut changed = false;
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
         let mut prompt: Option<(String, String)> = None;
@@ -468,7 +500,8 @@ impl App {
                     }
                     Event::ServerClipboard(text) => {
                         if conn.as_ref().map_or(true, |c| c.local.clipboard) {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            s.clip_synced = Some(text);
                         }
                     }
                     Event::Disconnected(reason) => {
@@ -1251,6 +1284,16 @@ impl App {
 /// picture. With two virtual displays there are two streams, shown as monitors 1
 /// and 2, or side by side for "Both". Returns whether anything visible changed;
 /// images no longer shown are pushed to `retired`.
+/// How often this PC's clipboard is checked for new text to send.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(750);
+
+/// Clipboard texts that differ only in line endings or trailing space are the same
+/// (otherwise a round trip through the Mac would bounce back and forth).
+fn same_clip(a: &str, b: &str) -> bool {
+    let n = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
+    n(a) == n(b)
+}
+
 fn hp_refresh(s: &mut Session, h: &rfb::Handle, due: bool, mon: Mon, last_input: Option<Instant>, retired: &mut Vec<Arc<RenderImage>>) -> bool {
     let mut fresh = false;
     if due {

@@ -84,13 +84,20 @@ are two monitors.
 Requirements: a Mac with Apple silicon on macOS 14 or later with Screen Sharing on,
 an IPv4 address, and UDP ports 5900 and 5901 (the connection port and the next one;
 also 5902 for two virtual displays)
-reachable. Clipboard sync and remote cursor shapes are not implemented over
-HP; the local pointer is shown instead. Audio from the Mac (AAC-ELD) is decoded by a
+reachable. Remote cursor shapes are not implemented over HP; the local pointer is
+shown instead. Audio from the Mac (AAC-ELD) is decoded by a
 pure-Rust decoder built into SeeMyMac, so no system codec is needed (Fedora's
 `fdk-aac-free` cannot decode AAC-ELD). It plays through PulseAudio or PipeWire via
 libpulse-simple, falling back to `paplay`, `pw-play` or `aplay`; a Flatpak needs
-`--socket=pulseaudio`. `SEEMYMAC_NO_AUDIO=1` turns audio off. **Settings → Apple HP → Check decoder**
-verifies the bundled decoders; `SEEMYMAC_DEMO=1` starts a synthetic HP source for
+`--socket=pulseaudio`. `SEEMYMAC_NO_AUDIO=1` turns audio off.
+
+Clipboard: text copied on either side is pasted on the other, over HP and plain
+VNC, while the connection's **Local resources → Clipboard** option is on. Macs
+get Apple's own pasteboard messages (any character; modern apps see the text);
+other VNC servers get standard cut text, which is Latin-1 only. This PC's
+clipboard is checked while the SeeMyMac window has focus.
+
+**Settings → Apple HP → Check decoder** verifies the bundled decoders; `SEEMYMAC_DEMO=1` starts a synthetic HP source for
 testing without a Mac.
 
 Debug builds compile every dependency optimised (see `Cargo.toml`); without that,

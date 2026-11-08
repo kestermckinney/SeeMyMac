@@ -5,6 +5,7 @@
 //! Diffie-Hellman (30). Supported encodings: ZRLE, Raw, CopyRect, DesktopSize and
 //! ExtendedDesktopSize (used to discover multiple monitors).
 
+use crate::hp::clipboard;
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use anyhow::{anyhow, bail, Context, Result};
 use md5::{Digest, Md5};
@@ -175,6 +176,8 @@ pub enum Input {
     /// Apple High Performance with two virtual displays: pointer positions that
     /// follow refer to picture 0 (the first display) or 1 (the second).
     PointerTarget(u8),
+    /// Put this text on the remote clipboard.
+    Clipboard(String),
 }
 
 /// The input channel as the network side reads it: a run of queued pointer
@@ -317,6 +320,14 @@ fn run(
     }
     stage(format!("Connected to “{}”. Waiting for the first screen image ({}×{})…", init.name, init.width, init.height));
     send_setup(&mut stream)?;
+    let apple = init.apple;
+    if apple {
+        // Apple's viewer information turns on its status pushes, which announce
+        // pasteboard changes; then pasteboard monitoring itself. Without them the
+        // Mac never sends its clipboard to a VNC viewer.
+        stream.write_all(&crate::hp::negotiate::viewer_info_message())?;
+        stream.write_all(&clipboard::enable())?;
+    }
     request_update(&mut stream, false, init.width, init.height)?;
     events.send(Event::Connected { width: init.width, height: init.height, name: init.name }).ok();
 
@@ -338,6 +349,10 @@ fn run(
                     m.extend_from_slice(&keysym.to_be_bytes());
                     m
                 }
+                // Apple's own message reaches the pasteboard modern Mac apps read
+                // (and carries any character); ClientCutText is Latin-1 only.
+                Input::Clipboard(text) if apple => clipboard::send(&text).concat(),
+                Input::Clipboard(text) => client_cut_text(&text),
                 Input::UseVirtualDisplay { .. } | Input::ShowDisplay(_) | Input::PointerTarget(_) => continue,
             };
             if w2.lock().unwrap().write_all(&msg).is_err() {
@@ -354,6 +369,8 @@ pub struct ServerInit {
     pub width: u32,
     pub height: u32,
     pub name: String,
+    /// macOS Screen Sharing (RFB 003.889): its own clipboard messages are used.
+    pub apple: bool,
 }
 
 fn read_exact_n<R: Read>(r: &mut R, n: usize) -> Result<Vec<u8>> {
@@ -395,6 +412,7 @@ pub fn handshake<S: Read + Write>(s: &mut S, user: &str, password: &str, stage: 
     }
     // Apple reports 003.889; anything >= 3.8 is spoken as 3.8.
     let minor: u32 = ver[8..11].parse().unwrap_or(0);
+    let apple = minor == 889;
     if minor < 7 {
         bail!("server speaks RFB 3.{minor}; 3.7 or newer is required");
     }
@@ -453,7 +471,7 @@ pub fn handshake<S: Read + Write>(s: &mut S, user: &str, password: &str, stage: 
         bail!("server sent an invalid ServerInit ({width}x{height})");
     }
     let name = String::from_utf8_lossy(&read_exact_n(s, name_len as usize)?).into_owned();
-    Ok(ServerInit { width, height, name })
+    Ok(ServerInit { width, height, name, apple })
 }
 
 /// DES challenge response; VNC reverses the bits of each key byte.
@@ -554,6 +572,20 @@ fn request_update<W: Write>(w: &mut W, incremental: bool, width: u32, height: u3
     Ok(())
 }
 
+/// ClientCutText. RFB clipboard text is Latin-1; other characters become '?'.
+fn client_cut_text(text: &str) -> Vec<u8> {
+    let latin1: Vec<u8> = text.chars().filter(|&c| c != '\r').map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect();
+    let mut m = vec![6, 0, 0, 0];
+    m.extend_from_slice(&(latin1.len() as u32).to_be_bytes());
+    m.extend_from_slice(&latin1);
+    m
+}
+
+/// ServerCutText is Latin-1 by the spec, but some servers send UTF-8.
+fn cut_text_string(b: Vec<u8>) -> String {
+    String::from_utf8(b).unwrap_or_else(|e| e.into_bytes().iter().map(|&c| c as char).collect())
+}
+
 fn read_loop(
     stream: &mut TcpStream,
     writer: &Arc<Mutex<TcpStream>>,
@@ -590,8 +622,33 @@ fn read_loop(
                 if n > 1 << 24 {
                     bail!("clipboard text too large");
                 }
-                let text = String::from_utf8_lossy(&read_exact_n(stream, n)?).into_owned();
+                let text = cut_text_string(read_exact_n(stream, n)?);
                 events.send(Event::ServerClipboard(text)).ok();
+            }
+            // Apple status push: u16 length, then its body (bytes 2..4: the command).
+            clipboard::MSG_STATUS => {
+                let h = read_exact_n(stream, 3)?;
+                let body = read_exact_n(stream, u16::from_be_bytes([h[1], h[2]]) as usize)?;
+                let mut m = vec![clipboard::MSG_STATUS];
+                m.extend_from_slice(&h);
+                m.extend_from_slice(&body);
+                if clipboard::status_command(&m) == Some(clipboard::STATUS_CLIPBOARD_CHANGED) {
+                    writer.lock().unwrap().write_all(&clipboard::fetch())?;
+                }
+            }
+            // Apple pasteboard contents (the reply to a fetch).
+            clipboard::MSG_SEND => {
+                let h = read_exact_n(stream, 15)?;
+                let n = u32::from_be_bytes(h[11..15].try_into().unwrap()) as usize;
+                if n > 1 << 24 {
+                    bail!("clipboard data too large");
+                }
+                let mut m = vec![clipboard::MSG_SEND];
+                m.extend_from_slice(&h);
+                m.extend_from_slice(&read_exact_n(stream, n)?);
+                if let Some(text) = clipboard::text(&m) {
+                    events.send(Event::ServerClipboard(text)).ok();
+                }
             }
             t => bail!("unsupported server message type {t}"),
         }
@@ -1019,11 +1076,24 @@ mod tests {
     }
 
     /// Reads the client's SetPixelFormat + SetEncodings + first update request.
+    #[test]
+    fn plain_vnc_clipboard_text_is_latin1() {
+        let m = client_cut_text("héllo→x\r\nz");
+        assert_eq!(&m[..4], [6, 0, 0, 0]);
+        assert_eq!(u32::from_be_bytes(m[4..8].try_into().unwrap()) as usize, m.len() - 8);
+        assert_eq!(&m[8..], b"h\xe9llo?x\nz", "Latin-1, Unix line endings, '?' for the rest");
+        assert_eq!(cut_text_string(b"ca\xe9".to_vec()), "caé");
+        assert_eq!(cut_text_string("café".as_bytes().to_vec()), "café", "UTF-8 is kept");
+    }
+
     fn drain_client_setup(s: &mut TcpStream) {
         read_exact_n(s, 20).unwrap(); // SetPixelFormat
         let hdr = read_exact_n(s, 4).unwrap();
         let n = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
         read_exact_n(s, n * 4).unwrap();
+        // The fake server is a Mac (003.889): ViewerInfo, then AutoPasteboard.
+        let apple = read_exact_n(s, 66 + 8).unwrap();
+        assert_eq!((apple[0], apple[66]), (0x21, 0x15));
         read_exact_n(s, 10).unwrap(); // FramebufferUpdateRequest
     }
 
@@ -1056,7 +1126,19 @@ mod tests {
             assert_eq!(ptr, [5, 1, 0, 3, 0, 2]);
             let key = read_exact_n(s, 8).unwrap();
             assert_eq!(key, [4, 1, 0, 0, 0, 0, 0, 0x61]);
-            s.write_all(&[3, 0, 0, 0, 0, 0, 0, 2, b'h', b'i']).unwrap(); // ServerCutText
+            // A Mac gets clipboard text as Apple's 0x1f, which keeps every character.
+            let hdr = read_exact_n(s, 16).unwrap();
+            assert_eq!(hdr[0], clipboard::MSG_SEND);
+            let n = u32::from_be_bytes(hdr[12..16].try_into().unwrap()) as usize;
+            let mut m = hdr.clone();
+            m.extend(read_exact_n(s, n).unwrap());
+            assert_eq!(clipboard::text(&m).as_deref(), Some("héllo→x\nz"));
+            // "Pasteboard changed" must be answered with a fetch...
+            s.write_all(&[0x14, 0, 0, 4, 0, 1, 0, 2]).unwrap();
+            assert_eq!(read_exact_n(s, 8).unwrap(), clipboard::fetch());
+            // ...whose reply is the Mac's text.
+            s.write_all(&clipboard::send("hi ✓").concat()).unwrap();
+            s.write_all(&[3, 0, 0, 0, 0, 0, 0, 3, b'c', b'a', 0xe9]).unwrap(); // Latin-1 ServerCutText
             // then drop the connection
         });
         let h = connect(Config { host: "127.0.0.1".into(), port, username: String::new(), password: String::new() });
@@ -1081,8 +1163,11 @@ mod tests {
         }
         h.send(Input::Pointer { x: 3, y: 2, buttons: 1 });
         h.send(Input::Key { keysym: 0x61, down: true });
+        h.send(Input::Clipboard("héllo→x\nz".into()));
         let Event::ServerClipboard(t) = wait_event(&h, |e| matches!(e, Event::ServerClipboard(_))) else { unreachable!() };
-        assert_eq!(t, "hi");
+        assert_eq!(t, "hi ✓");
+        let Event::ServerClipboard(t) = wait_event(&h, |e| matches!(e, Event::ServerClipboard(_))) else { unreachable!() };
+        assert_eq!(t, "caé");
         let Event::Disconnected(reason) = wait_event(&h, |e| matches!(e, Event::Disconnected(_))) else { unreachable!() };
         assert!(reason.is_some(), "a dropped connection must be reported");
         srv.join().unwrap();

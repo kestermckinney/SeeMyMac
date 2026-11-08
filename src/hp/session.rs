@@ -2,6 +2,7 @@
 //! threads that keep video, RTCP feedback and the control channel flowing.
 
 use super::crypto::{aes128_ecb_encrypt, Enc1103Rx, Enc1103Tx, SrtcpRx, SrtcpTx, SrtpRx, SrtpTx, SRTP_BLOB_LEN};
+use super::clipboard;
 use super::decode::{hevc_type, Codec, Picture, VideoDecoder};
 use super::negotiate::{self, fbu_request, Negotiated, Params};
 use super::net::{self, is_timeout};
@@ -866,9 +867,31 @@ fn handle_control(ctx: &Ctx, m: &[u8]) {
     }
 }
 
+/// Clipboard records (0x14 change notices, 0x1f contents); true when `m` was one.
+fn handle_clipboard(ctx: &Ctx, clip: &mut clipboard::Reassembler, m: &[u8]) -> bool {
+    if clip.in_progress() || m.first() == Some(&clipboard::MSG_SEND) {
+        if let Some(full) = clip.feed(m) {
+            if let Some(t) = clipboard::text(&full) {
+                // Never log the text: it may be a password.
+                log::info!("HP clipboard: {} characters from the Mac", t.chars().count());
+                let _ = ctx.events.send(Event::ServerClipboard(t));
+            }
+        }
+        return true;
+    }
+    if clipboard::status_command(m) == Some(clipboard::STATUS_CLIPBOARD_CHANGED) {
+        let _ = ctx.control.send(&clipboard::fetch());
+        return true;
+    }
+    false
+}
+
 fn tcp_reader(ctx: Arc<Ctx>, mut s: TcpStream, mut rx: Enc1103Rx, leftover: Vec<Vec<u8>>) {
+    let mut clip = clipboard::Reassembler::default();
     for m in &leftover {
-        handle_control(&ctx, m);
+        if !handle_clipboard(&ctx, &mut clip, m) {
+            handle_control(&ctx, m);
+        }
     }
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let mut buf = vec![0u8; 65536];
@@ -880,7 +903,9 @@ fn tcp_reader(ctx: Arc<Ctx>, mut s: TcpStream, mut rx: Enc1103Rx, leftover: Vec<
             }
             Ok(n) => {
                 for m in rx.feed(&buf[..n]) {
-                    handle_control(&ctx, &m);
+                    if !handle_clipboard(&ctx, &mut clip, &m) {
+                        handle_control(&ctx, &m);
+                    }
                 }
             }
             Err(e) if is_timeout(&e) || e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1158,6 +1183,10 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Fr
         None => None,
     };
 
+    // The Mac then announces each pasteboard change (0x14) for us to fetch. The
+    // current contents are not fetched: on connect this PC's clipboard is sent over.
+    ctx.control.send(&clipboard::enable())?;
+
     let result = (|| -> Result<()> {
         let mut next = Instant::now();
         let mut n = 0u64;
@@ -1251,6 +1280,12 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Fr
                     ctx.control.send(&fbu_request(false, 0xffff, 0xffff))?;
                     let mut sh = ctx.shared.lock().unwrap();
                     ctx.media.keyframe(&mut sh, true);
+                }
+                Ok(Input::Clipboard(text)) => {
+                    log::info!("HP clipboard: {} characters to the Mac", text.chars().count());
+                    for rec in clipboard::send(&text) {
+                        ctx.control.send(&rec)?;
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
