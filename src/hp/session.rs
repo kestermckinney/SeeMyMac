@@ -775,13 +775,23 @@ fn udp_reader(ctx: Arc<Ctx>, sock: UdpSocket, tx: std::sync::mpsc::SyncSender<(I
     }
 }
 
-/// The control port carries audio RTP (ignored) and RTCP; keep SR times for RRs.
+/// The control port carries audio RTP and RTCP; keep SR times for RRs and play the audio.
 fn rtcp_reader(ctx: Arc<Ctx>, sock: UdpSocket, rx: SrtcpRx) {
     let mut buf = vec![0u8; 65536];
     let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+    let audio = super::audio::Audio::start();
+    let mut audio_rx = audio.as_ref().map(|_| SrtpRx::new(&ctx.keys.audio_s));
     while !ctx.halted() {
         let Ok(n) = sock.recv(&mut buf) else { continue };
         let p = &buf[..n];
+        if let (Some(a), Some(srtp)) = (&audio, audio_rx.as_mut()) {
+            if n > 12 && p[0] >> 6 == 2 && p[1] & 0x7f == super::audio::PAYLOAD_TYPE {
+                if let Some(r) = srtp.decrypt(p) {
+                    a.push(r.payload);
+                }
+                continue;
+            }
+        }
         if n < 2 || p[0] & 0xc0 != 0x80 || !(200..=207).contains(&(p[1] & 0x7f)) {
             continue;
         }

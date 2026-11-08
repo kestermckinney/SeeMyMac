@@ -4,7 +4,7 @@
 //! RFB-based TCP handshake with Apple-private messages. This is a port of the
 //! protocol engine from iShareScreen (AGPL-3.0-or-later,
 //! <https://github.com/renegadelink/iShareScreen>, as pinned in SeeMac), limited to
-//! what SeeMyMac needs: one H.264 picture per frame, no audio, no clipboard.
+//! what SeeMyMac needs: one H.264 picture per frame, audio output, no clipboard.
 //!
 //! Layout:
 //! * [`net`] / [`negotiate`] / [`auth`]: the TCP handshake and authentication.
@@ -13,6 +13,7 @@
 //! * [`rtp`] / [`decode`]: depacketization, loss repair and H.264 decoding (`rust_h264`).
 //! * `session`: the running connection's threads.
 
+pub mod audio;
 pub mod auth;
 pub mod crypto;
 pub mod decode;

@@ -84,8 +84,12 @@ are two monitors.
 Requirements: a Mac with Apple silicon on macOS 14 or later with Screen Sharing on,
 an IPv4 address, and UDP ports 5900 and 5901 (the connection port and the next one;
 also 5902 for two virtual displays)
-reachable. Audio, clipboard sync and remote cursor shapes are not implemented over
-HP; the local pointer is shown instead. **Settings → Apple HP → Check decoder**
+reachable. Clipboard sync and remote cursor shapes are not implemented over
+HP; the local pointer is shown instead. Audio from the Mac (AAC-ELD) is decoded by a
+pure-Rust decoder built into SeeMyMac, so no system codec is needed (Fedora's
+`fdk-aac-free` cannot decode AAC-ELD). It plays through PulseAudio or PipeWire via
+libpulse-simple, falling back to `paplay`, `pw-play` or `aplay`; a Flatpak needs
+`--socket=pulseaudio`. `SEEMYMAC_NO_AUDIO=1` turns audio off. **Settings → Apple HP → Check decoder**
 verifies the bundled decoders; `SEEMYMAC_DEMO=1` starts a synthetic HP source for
 testing without a Mac.
 
