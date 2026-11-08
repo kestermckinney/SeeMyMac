@@ -22,8 +22,10 @@ pub(crate) const OK: u32 = 0x3FB950;
 pub(crate) const WARN: u32 = 0xD29922;
 pub(crate) const DANGER: u32 = 0xF47067;
 
+/// macOS and Windows use the OS window frame; Linux draws its own GNOME-style header bar.
+pub const NATIVE_FRAME: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 pub(crate) const TITLE_H: f32 = 32.0;
-pub(crate) const TOOLBAR_H: f32 = 40.0;
+pub(crate) const TOOLBAR_H: f32 = 34.0;
 pub(crate) const PULL_H: f32 = 24.0;
 
 fn status_color(s: &Status) -> u32 {
@@ -195,8 +197,9 @@ impl App {
         let win_btn = |id: &'static str, glyph: &'static str, danger: bool| {
             div()
                 .id(id)
-                .w(px(40.0))
-                .h(px(TITLE_H))
+                .size(px(24.0))
+                .mr(px(6.0))
+                .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -213,6 +216,7 @@ impl App {
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".into())
+            .rounded_t(px(self.corner_radius))
             .h(px(TITLE_H))
             .w_full()
             .flex_none()
@@ -229,8 +233,11 @@ impl App {
                     window.start_window_move();
                 }
             }))
-            .child(div().w(px(40.0)).flex().justify_center().child(div().size(px(14.0)).rounded(px(4.0)).bg(rgb(ACCENT))))
-            .child(div().flex_1().truncate().text_color(rgb(MUTED)).text_size(px(12.0)).child(title))
+            .child(div().w(px(78.0)).flex_none().flex().items_center().pl(px(10.0)).child(match app_icon() {
+                Some(i) => img(i).size(px(20.0)).object_fit(ObjectFit::Contain).into_any_element(),
+                None => div().into_any_element(),
+            }))
+            .child(div().flex_1().truncate().text_center().font_weight(FontWeight::BOLD).text_color(rgb(TEXT)).text_size(px(13.0)).child(title))
             .child(win_btn("win-min", "–", false).on_click(cx.listener(|_, _, window, _| window.minimize_window())))
             .child(win_btn("win-max", "▢", false).on_click(cx.listener(|_, _, window, _| window.zoom_window())))
             .child(win_btn("win-close", "✕", true).on_click(cx.listener(|this, _, _, cx| this.quit(cx))))
@@ -960,14 +967,17 @@ impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Remote area = window minus the chrome that is currently visible.
         let vp = window.viewport_size();
-        let top = if self.st.full { 0.0 } else { TITLE_H } + if self.st.pinned { TOOLBAR_H } else { 0.0 };
+        let top = if self.st.full || NATIVE_FRAME { 0.0 } else { TITLE_H } + if self.st.pinned { TOOLBAR_H } else { 0.0 };
         self.area.set(Bounds::new(point(px(0.0), px(top)), size(vp.width, (vp.height - px(top)).max(px(0.0)))));
 
+        let corner = if NATIVE_FRAME || self.st.full || window.is_maximized() { 0.0 } else { 10.0 };
+        self.corner_radius = corner;
         let view = self.st.view;
         let content = self.remote_content(cx);
 
         let area = div()
             .id("remote")
+            .rounded_b(px(corner))
             .flex_1()
             .min_h_0()
             .relative()
@@ -1013,6 +1023,8 @@ impl Render for App {
             .relative()
             .flex()
             .flex_col()
+            .rounded(px(corner))
+            .overflow_hidden()
             .bg(rgb(BG_CHROME))
             .text_color(rgb(TEXT))
             .text_size(px(13.0))
@@ -1020,9 +1032,24 @@ impl Render for App {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key_down(ev, window, cx)))
             .on_key_up(cx.listener(|this, ev: &KeyUpEvent, window, cx| this.on_key_up(ev, window, cx)))
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, window, cx| this.on_modifiers(ev, window, cx)))
-            .when(!self.st.full, |d| d.child(self.title_bar(cx)))
+            .when(!self.st.full && !NATIVE_FRAME, |d| d.child(self.title_bar(cx)))
             .when(self.st.pinned, |d| d.child(self.toolbar(cx)))
             .child(area)
-            .when(!self.st.full && !window.is_maximized(), |d| d.child(self.resize_handles()))
+            .when(!NATIVE_FRAME && !self.st.full && !window.is_maximized(), |d| d.child(self.resize_handles()))
     }
+}
+
+/// The application icon, decoded once from the embedded PNG (as premultiplied BGRA).
+fn app_icon() -> Option<std::sync::Arc<RenderImage>> {
+    static ICON: std::sync::OnceLock<Option<std::sync::Arc<RenderImage>>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let mut buf = image::load_from_memory_with_format(include_bytes!("../assets/icons/seemac.png"), image::ImageFormat::Png).ok()?.into_rgba8();
+        for p in buf.pixels_mut() {
+            let a = p[3] as u32;
+            let (r, g, b) = (p[0] as u32 * a / 255, p[1] as u32 * a / 255, p[2] as u32 * a / 255);
+            p.0 = [b as u8, g as u8, r as u8, a as u8];
+        }
+        Some(std::sync::Arc::new(RenderImage::new(smallvec::SmallVec::from_elem(image::Frame::new(buf), 1))))
+    })
+    .clone()
 }

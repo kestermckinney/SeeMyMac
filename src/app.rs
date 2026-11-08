@@ -133,6 +133,7 @@ pub struct App {
     /// ignores quit and window moves).
     pub quit_requested: bool,
     pub window_drags: u32,
+    pub corner_radius: f32,
     pub st: AppState,
     pub sessions: HashMap<String, Session>,
     pub focus: FocusHandle,
@@ -181,6 +182,7 @@ impl App {
             hp_result: None,
             quit_requested: false,
             window_drags: 0,
+            corner_radius: 0.0,
             st: AppState::new(),
             sessions: HashMap::new(),
             focus,

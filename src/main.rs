@@ -1,4 +1,4 @@
-use gpui::{prelude::*, px, size, Application, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions};
+use gpui::{prelude::*, px, size, Application, Bounds, SharedString, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions};
 use see_my_mac::{app::App, model::Store, settings::Settings};
 
 fn main() {
@@ -14,12 +14,15 @@ fn main() {
             .find(|n| n == "Inter")
             .map(SharedString::from);
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let native_frame = see_my_mac::view::NATIVE_FRAME;
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions { title: Some("SeeMyMac".into()), appears_transparent: true, ..Default::default() }),
-                window_decorations: Some(WindowDecorations::Client),
+                // macOS and Windows use the native frame; Linux draws a GNOME-style client-side header bar.
+                titlebar: Some(TitlebarOptions { title: Some("SeeMyMac".into()), appears_transparent: !native_frame, ..Default::default() }),
+                window_decorations: Some(if native_frame { WindowDecorations::Server } else { WindowDecorations::Client }),
                 window_min_size: Some(size(px(640.0), px(400.0))),
+                window_background: if native_frame { WindowBackgroundAppearance::Opaque } else { WindowBackgroundAppearance::Transparent },
                 app_id: Some("seemymac".into()),
                 ..Default::default()
             },
