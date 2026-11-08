@@ -142,6 +142,8 @@ pub struct App {
     /// Connection whose Delete button was pressed once (a second press confirms).
     pub confirm_delete: Option<String>,
     pub confirm_forget: bool,
+    /// Id of the open drop-down or toolbar picker, if any.
+    pub pick: Option<&'static str>,
     /// Where closing the connection dialog returns to (the manager, if it opened it).
     pub dialog_return: View,
     hp_check: Option<Arc<Mutex<Option<String>>>>,
@@ -171,6 +173,28 @@ pub struct App {
     _poll: Option<Task<()>>,
 }
 
+/// Key combinations that are hard to type locally (the OS or window manager grabs them).
+pub struct KeyCombo {
+    pub label: &'static str,
+    pub mods: &'static [u32],
+    pub key: u32,
+}
+
+pub const KEY_COMBOS: &[KeyCombo] = &[
+    KeyCombo { label: "Ctrl+Alt+Del", mods: &[rfb::KEYSYM_CONTROL, rfb::KEYSYM_ALT], key: rfb::KEYSYM_DELETE },
+    KeyCombo { label: "Ctrl+Shift+Esc", mods: &[rfb::KEYSYM_CONTROL, rfb::KEYSYM_SHIFT], key: 0xff1b },
+    KeyCombo { label: "Ctrl+Esc", mods: &[rfb::KEYSYM_CONTROL], key: 0xff1b },
+    KeyCombo { label: "Alt+Tab", mods: &[rfb::KEYSYM_ALT], key: 0xff09 },
+    KeyCombo { label: "Alt+F4", mods: &[rfb::KEYSYM_ALT], key: 0xffc1 },
+    KeyCombo { label: "Alt+Esc", mods: &[rfb::KEYSYM_ALT], key: 0xff1b },
+    KeyCombo { label: "Win / Super", mods: &[], key: rfb::KEYSYM_SUPER },
+    KeyCombo { label: "Win+D (show desktop)", mods: &[rfb::KEYSYM_SUPER], key: 0x64 },
+    KeyCombo { label: "Win+E (explorer)", mods: &[rfb::KEYSYM_SUPER], key: 0x65 },
+    KeyCombo { label: "Win+L (lock)", mods: &[rfb::KEYSYM_SUPER], key: 0x6c },
+    KeyCombo { label: "Win+R (run)", mods: &[rfb::KEYSYM_SUPER], key: 0x72 },
+    KeyCombo { label: "Print Screen", mods: &[], key: 0xff61 },
+];
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -198,6 +222,7 @@ impl App {
             manage_query: String::new(),
             confirm_delete: None,
             confirm_forget: false,
+            pick: None,
             dialog_return: View::Idle,
             hp_check: None,
             hp_result: None,
@@ -655,6 +680,10 @@ impl App {
     }
 
     pub fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pick.take().is_some() {
+            cx.notify();
+            return;
+        }
         match self.st.view {
             View::Password => return self.cancel_password(window, cx),
             View::Dialog => {
@@ -711,6 +740,7 @@ impl App {
         self.settings.apply_defaults(&mut draft);
         self.dialog_return = View::Idle;
         self.form = Some(Form { draft, password: String::new(), has_saved_password: false, is_new: true, tab: DialogTab::General, error: None });
+        self.pick = None;
         self.st.set_view(View::Dialog);
         self.field = Field::Name;
         window.focus(&self.focus);
@@ -722,6 +752,7 @@ impl App {
         let has_saved_password = vault::get(id).ok().flatten().is_some();
         self.dialog_return = if self.st.view == View::Manage { View::Manage } else { View::Idle };
         self.form = Some(Form { draft: c, password: String::new(), has_saved_password, is_new: false, tab: DialogTab::General, error: None });
+        self.pick = None;
         self.st.set_view(View::Dialog);
         self.field = Field::Name;
         window.focus(&self.focus);
@@ -808,14 +839,6 @@ impl App {
         self.st.set_view(View::Manage);
         self.field = Field::Manage;
         window.focus(&self.focus);
-        cx.notify();
-    }
-
-    pub fn toggle_favorite(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(c) = self.store.get_mut(id) {
-            c.fav = !c.fav;
-        }
-        self.persist();
         cx.notify();
     }
 
@@ -1122,15 +1145,19 @@ impl App {
     }
 
     pub fn send_ctrl_alt_del(&self) {
-        for (sym, down) in [
-            (rfb::KEYSYM_CONTROL, true),
-            (rfb::KEYSYM_ALT, true),
-            (rfb::KEYSYM_DELETE, true),
-            (rfb::KEYSYM_DELETE, false),
-            (rfb::KEYSYM_ALT, false),
-            (rfb::KEYSYM_CONTROL, false),
-        ] {
-            self.send(Input::Key { keysym: sym, down });
+        self.send_key_combo(0);
+    }
+
+    /// Press a `KEY_COMBOS` entry on the remote: modifiers down, key down and up, modifiers up.
+    pub fn send_key_combo(&self, i: usize) {
+        let Some(c) = KEY_COMBOS.get(i) else { return };
+        for m in c.mods {
+            self.send(Input::Key { keysym: *m, down: true });
+        }
+        self.send(Input::Key { keysym: c.key, down: true });
+        self.send(Input::Key { keysym: c.key, down: false });
+        for m in c.mods.iter().rev() {
+            self.send(Input::Key { keysym: *m, down: false });
         }
     }
 
@@ -1207,9 +1234,16 @@ impl App {
     }
 
     pub fn cycle_scaling(&mut self) {
+        let next = self.active_session().map(|s| s.scaling.next());
+        if let Some(v) = next {
+            self.set_scaling(v);
+        }
+    }
+
+    pub fn set_scaling(&mut self, v: Scaling) {
         if let Some(id) = self.st.active.clone() {
             if let Some(s) = self.sessions.get_mut(&id) {
-                s.scaling = s.scaling.next();
+                s.scaling = v;
             }
         }
     }

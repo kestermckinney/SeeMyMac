@@ -1,11 +1,12 @@
 //! Rendering, following the layout and tokens in ui_design/README.md.
 
-use crate::app::{App, DialogTab, Field, Status};
+use crate::app::{App, DialogTab, Field, Status, KEY_COMBOS};
 use crate::geometry;
 use crate::model::*;
 use crate::state::{Mon, View};
 use gpui::prelude::*;
 use gpui::*;
+use std::rc::Rc;
 
 // Visual tokens (design §9).
 pub(crate) const BG_CHROME: u32 = 0x0D1117;
@@ -91,22 +92,6 @@ pub(crate) fn label_text(t: &str) -> Div {
     div().text_color(rgb(MUTED)).text_size(px(12.0)).child(t.to_string())
 }
 
-pub(crate) fn checkbox_box(on: bool) -> Div {
-    div()
-        .size(px(16.0))
-        .flex_none()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(rgb(if on { ACCENT } else { BORDER }))
-        .bg(rgb(if on { ACCENT } else { BG_CHROME }))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(11.0))
-        .text_color(rgb(0xFFFFFF))
-        .child(if on { "✓" } else { "" })
-}
-
 impl App {
     pub(crate) fn text_field(&self, id: &'static str, field: Field, value: &str, placeholder: &str, masked: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.field == field;
@@ -136,16 +121,48 @@ impl App {
             })
     }
 
-    pub(crate) fn cycle<T: Copy + PartialEq + 'static>(
-        id: &'static str,
-        all: &'static [T],
-        current: T,
-        label: impl Fn(T) -> &'static str,
-        apply: impl Fn(&mut Connection, T) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let next = all[(all.iter().position(|x| *x == current).unwrap_or(0) + 1) % all.len()];
-        div()
+    /// The styled list shared by every dropdown and toolbar picker.
+    pub(crate) fn popup_list(id: &'static str, labels: &[SharedString], current: Option<usize>, on_pick: Rc<dyn Fn(&mut App, usize)>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let mut list = div()
+            .id(SharedString::from(format!("{id}-list")))
+            .occlude()
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .rounded(px(6.0))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .shadow_lg();
+        for (i, l) in labels.iter().enumerate() {
+            let f = on_pick.clone();
+            list = list.child(
+                div()
+                    .id((id, i))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .bg(rgb(if current == Some(i) { SELECTED } else { SURFACE }))
+                    .hover(|s| s.bg(rgb(SELECTED)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pick = None;
+                        f(this, i);
+                        cx.notify();
+                    }))
+                    .child(l.clone()),
+            );
+        }
+        list
+    }
+
+    /// A drop-down picker: a button showing the current choice that opens a list.
+    pub(crate) fn dropdown(&self, id: &'static str, labels: Vec<SharedString>, current: usize, on_pick: Rc<dyn Fn(&mut App, usize)>, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.pick == Some(id);
+        let button = div()
             .id(id)
             .h(px(32.0))
             .w_full()
@@ -156,35 +173,45 @@ impl App {
             .rounded(px(6.0))
             .bg(rgb(BG_CHROME))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(if open { ACCENT_DARK } else { BORDER }))
             .cursor_pointer()
             .hover(|s| s.border_color(rgb(ACCENT_DARK)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(f) = &mut this.form {
-                    apply(&mut f.draft, next);
-                }
+                this.pick = if this.pick == Some(id) { None } else { Some(id) };
                 cx.notify();
             }))
-            .child(label(current))
-            .child(div().text_color(rgb(MUTED)).child("▾"))
+            .child(labels.get(current).cloned().unwrap_or_default())
+            .child(div().text_color(rgb(MUTED)).child("▾"));
+        let list = Self::popup_list(id, &labels, Some(current), on_pick, cx).absolute().top(px(34.0)).left_0().w_full();
+        div().relative().w_full().child(button).when(open, |d| d.child(deferred(list).with_priority(1))).into_any_element()
     }
 
-    pub(crate) fn check(id: &'static str, text: &'static str, on: bool, apply: impl Fn(&mut Connection, bool) + 'static, cx: &mut Context<Self>) -> Stateful<Div> {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(28.0))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(f) = &mut this.form {
-                    apply(&mut f.draft, !on);
-                }
-                cx.notify();
-            }))
-            .child(checkbox_box(on))
-            .child(text)
+    pub(crate) fn cycle<T: Copy + PartialEq + 'static>(
+        &self,
+        id: &'static str,
+        all: &'static [T],
+        current: T,
+        label: impl Fn(T) -> &'static str,
+        apply: impl Fn(&mut Connection, T) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let labels = all.iter().map(|v| SharedString::from(label(*v))).collect();
+        let cur = all.iter().position(|x| *x == current).unwrap_or(0);
+        self.dropdown(id, labels, cur, Rc::new(move |this, i| {
+            if let Some(f) = &mut this.form {
+                apply(&mut f.draft, all[i]);
+            }
+        }), cx)
+    }
+
+    /// An on/off setting, shown as a Yes/No drop-down.
+    pub(crate) fn check(&self, id: &'static str, text: &'static str, on: bool, apply: impl Fn(&mut Connection, bool) + 'static, cx: &mut Context<Self>) -> AnyElement {
+        let dd = self.dropdown(id, vec!["Yes".into(), "No".into()], if on { 0 } else { 1 }, Rc::new(move |this, i| {
+            if let Some(f) = &mut this.form {
+                apply(&mut f.draft, i == 0);
+            }
+        }), cx);
+        div().flex().items_center().gap(px(12.0)).min_h(px(40.0)).child(div().w(px(190.0)).flex_none().child(label_text(text))).child(div().flex_1().min_w_0().child(dd)).into_any_element()
     }
 
     // ----- chrome -----------------------------------------------------------
@@ -328,7 +355,7 @@ impl App {
                 .child(seg("monall", "Both", Mon::All, cx))
         });
 
-        let res = self.active_session().filter(|s| s.size.0 > 0).map_or("—".to_string(), |s| format!("{} × {} · {}", s.size.0, s.size.1, s.scaling.short()));
+        let res = self.active_session().filter(|s| s.size.0 > 0).map_or(String::new(), |s| format!("{} × {} · {}", s.size.0, s.size.1, s.scaling.short()));
 
         div()
             .id("toolbar")
@@ -342,13 +369,13 @@ impl App {
             .bg(rgb(BG_CHROME))
             .border_b_1()
             .border_color(rgb(DIVIDER))
-            .child(tool_btn("btn-connections", "Connections ▾").on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))))
+            .child(tool_btn("btn-connections", "").child(svg().path("ui/menu.svg").size(px(18.0)).text_color(rgb(TEXT))).on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))))
             .child(tabs)
             .child(tool_btn("btn-new", "+").on_click(cx.listener(|this, _, window, cx| this.new_connection_dialog(window, cx))))
             .child(div().flex_1())
             .children(mon_sel)
             .child(div().px(px(8.0)).text_color(rgb(MUTED)).flex_none().child(res))
-            .child(tool_btn("btn-switch", "Switch").on_click(cx.listener(|this, _, window, cx| {
+            .child(tool_btn("btn-switch", "").child(svg().path("ui/switch.svg").size(px(16.0)).text_color(rgb(TEXT))).on_click(cx.listener(|this, _, window, cx| {
                 this.st.toggle_view(View::Switcher);
                 window.focus(&this.focus);
                 cx.notify();
@@ -356,16 +383,48 @@ impl App {
             .when(self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| {
                 d.child(tool_btn("btn-virtual", "Use virtual display").on_click(cx.listener(|this, _, _, cx| this.use_virtual_display(cx))))
             })
-            .child(tool_btn("btn-cad", "Ctrl+Alt+Del").on_click(cx.listener(|this, _, _, _| this.send_ctrl_alt_del())))
-            .child(tool_btn("btn-scale", "Scale").on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_scaling();
+            .child(tool_btn("btn-cad", "").child(svg().path("ui/keys.svg").size(px(16.0)).text_color(rgb(TEXT))).child(div().ml(px(4.0)).text_color(rgb(MUTED)).child("▾")).on_click(cx.listener(|this, _, _, cx| {
+                this.pick = if this.pick == Some("tb-keys") { None } else { Some("tb-keys") };
                 cx.notify();
             })))
-            .child(tool_btn("btn-pin", "Unpin").on_click(cx.listener(|this, _, _, cx| {
-                this.st.toggle_pin();
+            .child(tool_btn("btn-scale", "").child(svg().path("ui/scale.svg").size(px(16.0)).text_color(rgb(TEXT))).child(div().ml(px(6.0)).child(self.active_session().map_or(Scaling::Fit, |s| s.scaling).short())).child(div().ml(px(4.0)).text_color(rgb(MUTED)).child("▾")).on_click(cx.listener(|this, _, _, cx| {
+                this.pick = if this.pick == Some("tb-scale") { None } else { Some("tb-scale") };
                 cx.notify();
             })))
-            .child(tool_btn("btn-full", if self.st.full { "Exit full screen" } else { "Full screen" }).on_click(cx.listener(|this, _, window, cx| this.toggle_full(window, cx))))
+            .child(
+                tool_btn("btn-pin", "")
+                    .child(svg().path(if self.st.pinned { "ui/pin.svg" } else { "ui/pin-off.svg" }).size(px(16.0)).text_color(rgb(if self.st.pinned { ACCENT_DARK } else { MUTED })))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.st.toggle_pin();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                tool_btn("btn-full", "")
+                    .child(svg().path(if self.st.full { "ui/fullscreen-exit.svg" } else { "ui/fullscreen.svg" }).size(px(16.0)).text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_full(window, cx))),
+            )
+    }
+
+    /// Picker lists opened from the toolbar (scaling and special key combinations).
+    fn toolbar_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (id, labels, current, on_pick): (&'static str, Vec<SharedString>, Option<usize>, Rc<dyn Fn(&mut App, usize)>) = if self.pick == Some("tb-keys") {
+            ("tb-keys", KEY_COMBOS.iter().map(|c| SharedString::from(c.label)).collect(), None, Rc::new(|this, i| this.send_key_combo(i)))
+        } else {
+            let cur = self.active_session().map_or(Scaling::Fit, |s| s.scaling);
+            ("tb-scale", Scaling::ALL.iter().map(|s| SharedString::from(s.label())).collect(), Scaling::ALL.iter().position(|s| *s == cur), Rc::new(|this, i| this.set_scaling(Scaling::ALL[i])))
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .child(div().id("picker-backdrop").absolute().top_0().left_0().right_0().bottom_0().on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.pick = None;
+                cx.notify();
+            })))
+            .child(Self::popup_list(id, &labels, current, on_pick, cx).absolute().top(px(2.0)).right(px(8.0)).w(px(220.0)))
     }
 
     /// Shown while an Apple HP session that wants a virtual display is still on the
@@ -582,8 +641,7 @@ impl App {
             let ql = q.trim().to_lowercase();
             ql.is_empty() || c.name.to_lowercase().contains(&ql) || c.host.to_lowercase().contains(&ql)
         };
-        let favs: Vec<Connection> = self.store.favorites().into_iter().filter(matches).cloned().collect();
-        let recent: Vec<Connection> = self.store.recent().into_iter().filter(matches).cloned().collect();
+        let all: Vec<Connection> = self.store.connections.iter().filter(matches).cloned().collect();
 
         let section = |t: String| div().px(px(14.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(MUTED)).child(t);
         let row_base = |id: ElementId| div().id(id).min_h(px(40.0)).px(px(14.0)).flex().items_center().gap(px(10.0)).cursor_pointer().hover(|s| s.bg(rgb(SELECTED)));
@@ -613,17 +671,16 @@ impl App {
             }
         }
 
-        let conn_row = |c: &Connection, idx: usize, prefix: &'static str, icon: &'static str, cx: &mut Context<Self>| {
+        let conn_row = |c: &Connection, idx: usize, prefix: &'static str, cx: &mut Context<Self>| {
             let open = self.st.is_open(&c.id);
             let (oid, eid) = (c.id.clone(), c.id.clone());
             row_base(ElementId::from((prefix, idx)))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_connection(&oid, window, cx)))
-                .child(div().w(px(16.0)).text_color(rgb(if prefix == "fav" { WARN } else { MUTED })).child(icon))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(c.display_name().to_string())).child(div().truncate().text_size(px(12.0)).text_color(rgb(MUTED)).child(if prefix == "fav" { c.subtitle() } else { c.host.clone() })))
+                .child(div().flex_1().min_w_0().truncate().child(c.display_name().to_string()))
                 .when(open, |d| d.child(div().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).bg(rgb(SELECTED)).border_1().border_color(rgb(BORDER)).text_size(px(11.0)).child("Open")))
                 .child(
                     div()
-                        .id(ElementId::from((if prefix == "fav" { "fav-edit" } else { "rec-edit" }, idx)))
+                        .id(ElementId::from(("con-edit", idx)))
                         .size(px(28.0))
                         .flex()
                         .items_center()
@@ -639,19 +696,13 @@ impl App {
                 )
         };
 
-        if !favs.is_empty() {
-            list = list.child(section("FAVORITES".into()));
-            for (i, c) in favs.iter().enumerate() {
-                list = list.child(conn_row(c, i, "fav", "★", cx));
+        if !all.is_empty() {
+            list = list.child(section("CONNECTIONS".into()));
+            for (i, c) in all.iter().enumerate() {
+                list = list.child(conn_row(c, i, "con", cx));
             }
         }
-        if !recent.is_empty() {
-            list = list.child(section("RECENT".into()));
-            for (i, c) in recent.iter().enumerate() {
-                list = list.child(conn_row(c, i, "rec", "◷", cx));
-            }
-        }
-        if favs.is_empty() && recent.is_empty() && self.st.open.is_empty() {
+        if all.is_empty() && self.st.open.is_empty() {
             list = list.child(div().px(px(14.0)).py(px(12.0)).text_color(rgb(MUTED)).child(if q.trim().is_empty() { "No saved connections yet.".to_string() } else { format!("No match. Press Enter to connect to “{}”.", q.trim()) }));
         }
 
@@ -771,6 +822,7 @@ impl App {
                 .border_color(rgb(if sel { ACCENT_DARK } else { SURFACE }))
                 .text_color(rgb(if sel { TEXT } else { MUTED }))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.pick = None;
                     if let Some(f) = &mut this.form {
                         f.tab = t;
                     }
@@ -812,42 +864,41 @@ impl App {
                     .child(row("Host name or IP address", self.text_field("f-host", Field::Host, &d.host, "mac.local or 192.168.1.20", false, cx).into_any_element()))
                     .child(row("Port", self.text_field("f-port", Field::Port, &d.port, &d.proto.default_port().to_string(), false, cx).into_any_element()))
                     .child(row("User name", self.text_field("f-user", Field::User, &d.user, "Optional for VNC", false, cx).into_any_element()))
-                    .child(row("Credentials", Self::cycle("f-cred", &CredentialMode::ALL, d.credentials, CredentialMode::label, |c, v| c.credentials = v, cx).into_any_element()))
+                    .child(row("Credentials", self.cycle("f-cred", &CredentialMode::ALL, d.credentials, CredentialMode::label, |c, v| c.credentials = v, cx).into_any_element()))
                     .when(d.credentials == CredentialMode::Vault, |col| {
                         col.child(row("Password", self.text_field("f-pass", Field::Password, &form.password, if form.has_saved_password { "Saved. Type to replace it" } else { "Stored in the system keyring" }, true, cx).into_any_element()))
                     })
-                    .child(row("Group", Self::cycle("f-group", &GROUPS, GROUPS.iter().copied().find(|g| *g == d.group).unwrap_or(GROUPS[0]), |g| g, |c, v| c.group = v.to_string(), cx).into_any_element()))
+                    .child(row("Group", self.cycle("f-group", &GROUPS, GROUPS.iter().copied().find(|g| *g == d.group).unwrap_or(GROUPS[0]), |g| g, |c, v| c.group = v.to_string(), cx).into_any_element()))
                     .child(row("Gateway (optional)", self.text_field("f-gw", Field::Gateway, &d.gateway, "[GATEWAY HOST]", false, cx).into_any_element()))
-                    .child(div().pl(px(202.0)).child(Self::check("c-fav", "Show in Favorites", d.fav, |c, v| c.fav = v, cx)))
-                    .child(div().pl(px(202.0)).child(Self::check("c-reconnect", "Reconnect automatically if dropped", d.reconnect, |c, v| c.reconnect = v, cx)))
+                    .child(self.check("c-reconnect", "Reconnect automatically if dropped", d.reconnect, |c, v| c.reconnect = v, cx))
                     .into_any_element()
             }
             DialogTab::Display => div()
                 .flex()
                 .flex_col()
-                .child(row("Remote resolution", Self::cycle("d-res", &Resolution::ALL, d.resolution, Resolution::label, |c, v| c.resolution = v, cx).into_any_element()))
-                .child(row("Scaling", Self::cycle("d-scale", &Scaling::ALL, d.scaling, Scaling::label, |c, v| c.scaling = v, cx).into_any_element()))
-                .child(row("Color depth", Self::cycle("d-depth", &ColorDepth::ALL, d.depth, ColorDepth::label, |c, v| c.depth = v, cx).into_any_element()))
-                .child(row("Start in", Self::cycle("d-start", &StartIn::ALL, d.start_in, StartIn::label, |c, v| c.start_in = v, cx).into_any_element()))
-                .child(row("When the remote PC has more monitors than this PC", Self::cycle("d-multi", &MultiMonitor::ALL, d.multi_monitor, MultiMonitor::label, |c, v| c.multi_monitor = v, cx).into_any_element()))
+                .child(row("Remote resolution", self.cycle("d-res", &Resolution::ALL, d.resolution, Resolution::label, |c, v| c.resolution = v, cx).into_any_element()))
+                .child(row("Scaling", self.cycle("d-scale", &Scaling::ALL, d.scaling, Scaling::label, |c, v| c.scaling = v, cx).into_any_element()))
+                .child(row("Color depth", self.cycle("d-depth", &ColorDepth::ALL, d.depth, ColorDepth::label, |c, v| c.depth = v, cx).into_any_element()))
+                .child(row("Start in", self.cycle("d-start", &StartIn::ALL, d.start_in, StartIn::label, |c, v| c.start_in = v, cx).into_any_element()))
+                .child(row("When the remote PC has more monitors than this PC", self.cycle("d-multi", &MultiMonitor::ALL, d.multi_monitor, MultiMonitor::label, |c, v| c.multi_monitor = v, cx).into_any_element()))
                 .when(d.proto == Proto::Apple, |col| {
-                    col.child(div().pl(px(202.0)).child(Self::check("d-virtual", "Offer a virtual display after login (blanks the Mac's own screens)", d.virtual_display, |c, v| c.virtual_display = v, cx)))
+                    col.child(self.check("d-virtual", "Offer a virtual display after login (blanks the Mac's own screens)", d.virtual_display, |c, v| c.virtual_display = v, cx))
                         .when(d.virtual_display, |col| {
-                            col.child(row("Virtual displays", Self::cycle("d-virtual-count", &[1u8, 2], d.virtual_displays.clamp(1, 2), |n| if n == 2 { "2 (shown as monitors 1 and 2)" } else { "1" }, |c, v| c.virtual_displays = v, cx).into_any_element()))
+                            col.child(row("Virtual displays", self.cycle("d-virtual-count", &[1u8, 2], d.virtual_displays.clamp(1, 2), |n| if n == 2 { "2 (shown as monitors 1 and 2)" } else { "1" }, |c, v| c.virtual_displays = v, cx).into_any_element()))
                         })
                 })
-                .child(div().pl(px(202.0)).child(Self::check("d-span", "Span all local monitors", d.span_monitors, |c, v| c.span_monitors = v, cx)))
+                .child(self.check("d-span", "Span all local monitors", d.span_monitors, |c, v| c.span_monitors = v, cx))
                 .into_any_element(),
             DialogTab::Local => div()
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(Self::check("l-clip", "Clipboard", d.local.clipboard, |c, v| c.local.clipboard = v, cx))
-                .child(Self::check("l-drives", "Local drives", d.local.drives, |c, v| c.local.drives = v, cx))
-                .child(Self::check("l-print", "Printers", d.local.printers, |c, v| c.local.printers = v, cx))
-                .child(Self::check("l-audio", "Audio playback", d.local.audio, |c, v| c.local.audio = v, cx))
-                .child(Self::check("l-keys", "Windows key combinations", d.local.key_combinations, |c, v| c.local.key_combinations = v, cx))
-                .child(Self::check("l-smart", "Smart cards", d.local.smart_cards, |c, v| c.local.smart_cards = v, cx))
+                .child(self.check("l-clip", "Clipboard", d.local.clipboard, |c, v| c.local.clipboard = v, cx))
+                .child(self.check("l-drives", "Local drives", d.local.drives, |c, v| c.local.drives = v, cx))
+                .child(self.check("l-print", "Printers", d.local.printers, |c, v| c.local.printers = v, cx))
+                .child(self.check("l-audio", "Audio playback", d.local.audio, |c, v| c.local.audio = v, cx))
+                .child(self.check("l-keys", "Windows key combinations", d.local.key_combinations, |c, v| c.local.key_combinations = v, cx))
+                .child(self.check("l-smart", "Smart cards", d.local.smart_cards, |c, v| c.local.smart_cards = v, cx))
                 .into_any_element(),
         };
 
@@ -1012,6 +1063,7 @@ impl Render for App {
                 )
                 .child(self.menu(cx))
             })
+            .when(matches!(self.pick, Some("tb-keys") | Some("tb-scale")) && view == View::Idle, |d| d.child(self.toolbar_picker(cx)))
             .when(view == View::Switcher, |d| d.child(self.switcher(cx)))
             .when(view == View::Dialog, |d| d.child(self.dialog(cx)))
             .when(view == View::Manage, |d| d.child(self.manage_panel(cx)))
@@ -1055,4 +1107,27 @@ fn app_icon() -> Option<std::sync::Arc<RenderImage>> {
         Some(std::sync::Arc::new(RenderImage::new(smallvec::SmallVec::from_elem(image::Frame::new(buf), 1))))
     })
     .clone()
+}
+
+/// Embedded icons (`assets/ui`).
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        Ok(match path {
+            "ui/menu.svg" => Some(include_bytes!("../assets/ui/menu.svg").as_slice().into()),
+            "ui/keys.svg" => Some(include_bytes!("../assets/ui/keys.svg").as_slice().into()),
+            "ui/scale.svg" => Some(include_bytes!("../assets/ui/scale.svg").as_slice().into()),
+            "ui/switch.svg" => Some(include_bytes!("../assets/ui/switch.svg").as_slice().into()),
+            "ui/pin.svg" => Some(include_bytes!("../assets/ui/pin.svg").as_slice().into()),
+            "ui/pin-off.svg" => Some(include_bytes!("../assets/ui/pin-off.svg").as_slice().into()),
+            "ui/fullscreen.svg" => Some(include_bytes!("../assets/ui/fullscreen.svg").as_slice().into()),
+            "ui/fullscreen-exit.svg" => Some(include_bytes!("../assets/ui/fullscreen-exit.svg").as_slice().into()),
+            _ => None,
+        })
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(vec![])
+    }
 }

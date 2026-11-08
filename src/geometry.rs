@@ -20,7 +20,7 @@ pub fn image_rect(area_w: f32, area_h: f32, iw: f32, ih: f32, scaling: Scaling) 
     let scale = match scaling {
         Scaling::Fit => (area_w / iw).min(area_h / ih),
         Scaling::Fill => (area_w / iw).max(area_h / ih),
-        Scaling::Actual => 1.0,
+        other => other.factor().unwrap_or(1.0),
     };
     let (w, h) = (iw * scale, ih * scale);
     Rect { x: (area_w - w) / 2.0, y: (area_h - h) / 2.0, w, h }

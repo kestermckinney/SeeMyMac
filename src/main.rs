@@ -3,7 +3,7 @@ use see_my_mac::{app::App, model::Store, settings::Settings};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("see_my_mac=info")).format_timestamp_millis().init();
-    Application::new().run(|cx: &mut gpui::App| {
+    Application::new().with_assets(see_my_mac::view::Assets).run(|cx: &mut gpui::App| {
         let store = Store::load(Store::default_path());
         let settings = Settings::load(Settings::default_path());
         // Prefer the design's Inter font when installed; otherwise the system default.

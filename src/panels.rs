@@ -7,6 +7,7 @@ use crate::settings::{CommandKey, Settings, RECONNECT_CHOICES};
 use crate::view::*;
 use gpui::prelude::*;
 use gpui::*;
+use std::rc::Rc;
 
 fn small_btn(id: impl Into<ElementId>, label: impl Into<SharedString>, color: u32) -> Stateful<Div> {
     div()
@@ -94,7 +95,7 @@ impl App {
         for (i, c) in all.iter().enumerate() {
             let open = self.st.is_open(&c.id);
             let armed = self.confirm_delete.as_deref() == Some(c.id.as_str());
-            let (fid, cid, eid, did, xid) = (c.id.clone(), c.id.clone(), c.id.clone(), c.id.clone(), c.id.clone());
+            let (cid, eid, did, xid) = (c.id.clone(), c.id.clone(), c.id.clone(), c.id.clone());
             list = list.child(
                 div()
                     .id(("mrow", i))
@@ -105,21 +106,6 @@ impl App {
                     .gap(px(8.0))
                     .border_b_1()
                     .border_color(rgb(DIVIDER))
-                    .child(
-                        div()
-                            .id(("mfav", i))
-                            .size(px(28.0))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .cursor_pointer()
-                            .text_color(rgb(if c.fav { WARN } else { MUTED }))
-                            .hover(|s| s.bg(rgb(SELECTED)))
-                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_favorite(&fid, cx)))
-                            .child(if c.fav { "★" } else { "☆" }),
-                    )
                     .child(
                         div()
                             .flex_1()
@@ -151,7 +137,7 @@ impl App {
             .gap(px(10.0))
             .child(self.text_field("manage-search", Field::Manage, &self.manage_query, &format!("Search {total} saved connection{}", if total == 1 { "" } else { "s" }), false, cx))
             .child(list)
-            .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child("★ shows a connection in the Favorites list of the Connections menu. Press Delete twice to remove a connection and its saved password."))
+            .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child("Press Delete twice to remove a connection and its saved password."))
             .into_any_element();
 
         let footer = div()
@@ -173,6 +159,7 @@ impl App {
     // ----- settings -----------------------------------------------------------
 
     fn settings_cycle<T: Copy + PartialEq + 'static>(
+        &self,
         id: &'static str,
         all: &'static [T],
         current: T,
@@ -180,47 +167,20 @@ impl App {
         apply: impl Fn(&mut Settings, T) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let next = all[(all.iter().position(|x| *x == current).unwrap_or(0) + 1) % all.len()];
-        div()
-            .id(id)
-            .h(px(32.0))
-            .w_full()
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .rounded(px(6.0))
-            .bg(rgb(BG_CHROME))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .cursor_pointer()
-            .hover(|s| s.border_color(rgb(ACCENT_DARK)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                apply(&mut this.settings, next);
-                this.save_settings();
-                cx.notify();
-            }))
-            .child(label(current))
-            .child(div().text_color(rgb(MUTED)).child("▾"))
-            .into_any_element()
+        let labels = all.iter().map(|v| SharedString::from(label(*v))).collect();
+        let cur = all.iter().position(|x| *x == current).unwrap_or(0);
+        self.dropdown(id, labels, cur, Rc::new(move |this, i| {
+            apply(&mut this.settings, all[i]);
+            this.save_settings();
+        }), cx)
     }
 
-    fn settings_check(id: &'static str, text: &'static str, on: bool, apply: impl Fn(&mut Settings, bool) + 'static, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(28.0))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                apply(&mut this.settings, !on);
-                this.save_settings();
-                cx.notify();
-            }))
-            .child(checkbox_box(on))
-            .child(text)
-            .into_any_element()
+    fn settings_check(&self, id: &'static str, text: &'static str, on: bool, apply: impl Fn(&mut Settings, bool) + 'static, cx: &mut Context<Self>) -> AnyElement {
+        let dd = self.dropdown(id, vec!["Yes".into(), "No".into()], if on { 0 } else { 1 }, Rc::new(move |this, i| {
+            apply(&mut this.settings, i == 0);
+            this.save_settings();
+        }), cx);
+        div().flex().items_center().gap(px(12.0)).min_h(px(40.0)).child(div().w(px(190.0)).flex_none().child(label_text(text))).child(div().flex_1().min_w_0().child(dd)).into_any_element()
     }
 
     pub(crate) fn settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -253,13 +213,13 @@ impl App {
                     .flex()
                     .flex_col()
                     .child(div().pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Defaults for new connections"))
-                    .child(form_row("Protocol", Self::settings_cycle("s-proto", &Proto::ALL, st.default_proto, |p| p.label().to_string(), |s, v| s.default_proto = v, cx)))
-                    .child(form_row("Start in", Self::settings_cycle("s-start", &StartIn::ALL, st.default_start_in, |p| p.label().to_string(), |s, v| s.default_start_in = v, cx)))
-                    .child(form_row("Scaling", Self::settings_cycle("s-scale", &Scaling::ALL, st.default_scaling, |p| p.label().to_string(), |s, v| s.default_scaling = v, cx)))
-                    .child(div().pl(px(202.0)).child(Self::settings_check("s-virtual", "Use a virtual display for Apple HP", st.default_virtual_display, |s, v| s.default_virtual_display = v, cx)))
+                    .child(form_row("Protocol", self.settings_cycle("s-proto", &Proto::ALL, st.default_proto, |p| p.label().to_string(), |s, v| s.default_proto = v, cx)))
+                    .child(form_row("Start in", self.settings_cycle("s-start", &StartIn::ALL, st.default_start_in, |p| p.label().to_string(), |s, v| s.default_start_in = v, cx)))
+                    .child(form_row("Scaling", self.settings_cycle("s-scale", &Scaling::ALL, st.default_scaling, |p| p.label().to_string(), |s, v| s.default_scaling = v, cx)))
+                    .child(self.settings_check("s-virtual", "Use a virtual display for Apple HP", st.default_virtual_display, |s, v| s.default_virtual_display = v, cx))
                     .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Sessions start on the Mac's own screen so a locked Mac can be logged in to; then Use virtual display (Ctrl+Alt+V) moves the session and blanks the Mac's screens."))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Connections"))
-                    .child(form_row("Reconnect attempts", Self::settings_cycle("s-reconnect", &RECONNECT_CHOICES, st.max_reconnects, |n| if n == 0 { "Never reconnect".into() } else { format!("Up to {n}") }, |s, v| s.max_reconnects = v, cx)))
+                    .child(form_row("Reconnect attempts", self.settings_cycle("s-reconnect", &RECONNECT_CHOICES, st.max_reconnects, |n| if n == 0 { "Never reconnect".into() } else { format!("Up to {n}") }, |s, v| s.max_reconnects = v, cx)))
                     .child(form_row(
                         "Saved passwords",
                         div()
@@ -277,7 +237,7 @@ impl App {
             SettingsTab::Input => div()
                 .flex()
                 .flex_col()
-                .child(form_row("Mac Command key", Self::settings_cycle("s-cmd", &CommandKey::ALL, st.command_key, |c| c.label().to_string(), |s, v| s.command_key = v, cx)))
+                .child(form_row("Mac Command key", self.settings_cycle("s-cmd", &CommandKey::ALL, st.command_key, |c| c.label().to_string(), |s, v| s.command_key = v, cx)))
                 .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Keyboard shortcuts"))
                 .children(
                     [

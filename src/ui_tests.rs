@@ -682,10 +682,6 @@ fn manager_edits_duplicates_favorites_and_deletes_with_confirmation(cx: &mut Tes
     // c2 is not a favourite and was never used by name, yet the manager lists it.
     assert_eq!(view.read_with(cx, |a, _| a.store.search(&a.manage_query).len()), 2);
 
-    // Favourite toggle.
-    cx.update(|_, cx| view.update(cx, |a, cx| a.toggle_favorite("c2", cx)));
-    assert!(view.read_with(cx, |a, _| a.store.get("c2").unwrap().fav));
-
     // Search narrows the list.
     cx.simulate_input("stud");
     assert_eq!(view.read_with(cx, |a, _| a.store.search(&a.manage_query).len()), 1);

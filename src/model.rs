@@ -78,29 +78,44 @@ pub enum Scaling {
     Fit,
     Actual,
     Fill,
+    P150,
+    P125,
+    P75,
+    P50,
 }
 impl Scaling {
-    pub const ALL: [Scaling; 3] = [Self::Fit, Self::Actual, Self::Fill];
+    pub const ALL: [Scaling; 7] = [Self::Fit, Self::Fill, Self::P150, Self::P125, Self::Actual, Self::P75, Self::P50];
     pub fn label(self) -> &'static str {
         match self {
             Self::Fit => "Fit to window",
-            Self::Actual => "100%",
             Self::Fill => "Fill",
+            Self::Actual => "100%",
+            Self::P150 => "150%",
+            Self::P125 => "125%",
+            Self::P75 => "75%",
+            Self::P50 => "50%",
         }
     }
     pub fn short(self) -> &'static str {
         match self {
             Self::Fit => "Fit",
-            Self::Actual => "100%",
-            Self::Fill => "Fill",
+            other => other.label(),
+        }
+    }
+    /// Fixed zoom factor, or None when it depends on the window.
+    pub fn factor(self) -> Option<f32> {
+        match self {
+            Self::Fit | Self::Fill => None,
+            Self::Actual => Some(1.0),
+            Self::P150 => Some(1.5),
+            Self::P125 => Some(1.25),
+            Self::P75 => Some(0.75),
+            Self::P50 => Some(0.5),
         }
     }
     pub fn next(self) -> Self {
-        match self {
-            Self::Fit => Self::Actual,
-            Self::Actual => Self::Fill,
-            Self::Fill => Self::Fit,
-        }
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
 }
 
