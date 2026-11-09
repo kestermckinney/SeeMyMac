@@ -19,7 +19,6 @@ md-5 = "0.10"
 num-bigint = { version = "0.4", features = ["rand"] }
 rand = "0.8"
 dirs = "5"
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
 flate2 = "1"
 # Native Apple High Performance engine (src/hp/).
 rust_h264 = "0.6"
@@ -31,7 +30,7 @@ hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 plist = "1"
 # Remote audio (src/hp/audio.rs): a pure-Rust AAC-ELD decoder, so no system
-# libfdk-aac is needed, and libpulse-simple loaded at run time for playback.
+# libfdk-aac is needed. Playback uses WASAPI on Windows and libpulse on Linux.
 fdk-aac-rs = { version = "0.1", default-features = false, features = ["decoder"] }
 libloading = "0.8"
 socket2 = "0.5"
@@ -42,9 +41,17 @@ raw-window-handle = "0.6"
 
 # Passes system shortcuts (Super, Super+Space) to the Mac on Wayland (src/inhibit.rs).
 [target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+windows = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 
 [profile.dev.package.see_my_mac]
 # Frame conversion runs per pixel; unoptimised code is far too slow for live video.

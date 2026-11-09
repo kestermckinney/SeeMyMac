@@ -180,6 +180,8 @@ pub struct App {
     pub sessions: HashMap<String, Session>,
     pub focus: FocusHandle,
     pub field: Field,
+    pub(crate) field_cursor: Option<(Field, usize)>,
+    pub(crate) field_anchor: Option<(Field, usize)>,
     pub quick: String,
     pub form: Option<Form>,
     pub pw: Option<PwPrompt>,
@@ -260,6 +262,8 @@ impl App {
             sessions: HashMap::new(),
             focus,
             field: Field::None,
+            field_cursor: None,
+            field_anchor: None,
             quick: String::new(),
             form: None,
             pw: None,
@@ -301,6 +305,8 @@ impl App {
         let Some(conn) = self.store.get(id).cloned() else { return };
         let start = conn.start_in;
         let added = self.st.open_session(id, start);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::None;
         if added {
             self.store.touch(id, now_secs());
@@ -714,6 +720,8 @@ impl App {
         let user = self.sessions.get(id).map(|s| s.user.clone()).unwrap_or_default();
         self.pw = Some(PwPrompt { conn_id: id.to_string(), user, pass: String::new(), error });
         self.st.set_view(View::Password);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::PwPass;
         window.focus(&self.focus);
         cx.notify();
@@ -722,6 +730,8 @@ impl App {
     pub fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.pw.take() else { return };
         self.st.close_overlay();
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::None;
         if let Some(c) = self.store.get_mut(&p.conn_id) {
             if c.user != p.user {
@@ -747,6 +757,8 @@ impl App {
     pub fn cancel_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let abandoned = self.pw.take().map(|p| p.conn_id).filter(|id| self.sessions.get(id).map_or(false, |s| s.handle.is_none() && !s.ever_connected));
         self.st.close_overlay();
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::None;
         if let Some(id) = abandoned {
             self.close_session(&id, window, cx);
@@ -781,6 +793,8 @@ impl App {
         let copied = self.active_session().and_then(|s| s.mac_files.first().cloned()).unwrap_or_default();
         self.get_file = Some((copied, None));
         self.st.set_view(View::GetFile);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::GetPath;
         window.focus(&self.focus);
         cx.notify();
@@ -805,6 +819,8 @@ impl App {
         self.send(Input::GetFile { paths, dest: self.settings.download_path() });
         self.get_file = None;
         self.st.close_overlay();
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::None;
         window.focus(&self.focus);
         cx.notify();
@@ -815,6 +831,8 @@ impl App {
     pub fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.st.toggle_view(View::Menu);
         self.quick.clear();
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = if self.st.view == View::Menu { Field::Quick } else { Field::None };
         window.focus(&self.focus);
         cx.notify();
@@ -840,6 +858,8 @@ impl App {
         self.confirm_delete = None;
         self.confirm_forget = false;
         self.st.close_overlay();
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::None;
         window.focus(&self.focus);
         cx.notify();
@@ -884,6 +904,8 @@ impl App {
         self.form = Some(Form { draft, password: String::new(), has_saved_password: false, is_new: true, tab: DialogTab::General, error: None });
         self.pick = None;
         self.st.set_view(View::Dialog);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::Name;
         window.focus(&self.focus);
         cx.notify();
@@ -896,6 +918,8 @@ impl App {
         self.form = Some(Form { draft: c, password: String::new(), has_saved_password, is_new: false, tab: DialogTab::General, error: None });
         self.pick = None;
         self.st.set_view(View::Dialog);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::Name;
         window.focus(&self.focus);
         cx.notify();
@@ -941,6 +965,8 @@ impl App {
             self.form = None;
             self.dialog_return = View::Idle;
             self.st.close_overlay();
+            self.field_cursor = None;
+            self.field_anchor = None;
             self.field = Field::None;
         } else {
             self.leave_dialog();
@@ -970,6 +996,8 @@ impl App {
         self.form = None;
         let back = std::mem::replace(&mut self.dialog_return, View::Idle);
         self.st.set_view(back);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = if back == View::Manage { Field::Manage } else { Field::None };
     }
 
@@ -979,6 +1007,8 @@ impl App {
         self.manage_query.clear();
         self.confirm_delete = None;
         self.st.set_view(View::Manage);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::Manage;
         window.focus(&self.focus);
         cx.notify();
@@ -1017,6 +1047,8 @@ impl App {
         self.settings_tab = SettingsTab::General;
         self.confirm_forget = false;
         self.st.set_view(View::Settings);
+        self.field_cursor = None;
+        self.field_anchor = None;
         self.field = Field::None;
         window.focus(&self.focus);
         cx.notify();
@@ -1104,6 +1136,46 @@ impl App {
         }
     }
 
+    pub(crate) fn cursor_for(&self, field: Field, value: &str) -> usize {
+        let mut i = self.field_cursor.filter(|(f, _)| *f == field).map_or(value.len(), |(_, i)| i.min(value.len()));
+        while !value.is_char_boundary(i) { i -= 1; }
+        i
+    }
+
+    fn edit_field(&mut self, key: &str, text: Option<&str>, extend: bool) {
+        let field = self.field;
+        let saved = self.field_cursor;
+        let anchor = self.field_anchor.filter(|(f, _)| *f == field).map(|(_, i)| i);
+        let Some(buf) = self.field_buf() else { return };
+        let mut cursor = saved.filter(|(f, _)| *f == field).map_or(buf.len(), |(_, i)| i.min(buf.len()));
+        while !buf.is_char_boundary(cursor) { cursor -= 1; }
+        let mut anchor = anchor.unwrap_or(cursor).min(buf.len());
+        while !buf.is_char_boundary(anchor) { anchor -= 1; }
+        let range = anchor.min(cursor)..anchor.max(cursor);
+        let moving = matches!(key, "left" | "right" | "home" | "end");
+        if !moving && !range.is_empty() {
+            buf.replace_range(range.clone(), "");
+            cursor = range.start;
+        }
+        let prev = buf[..cursor].char_indices().last().map_or(0, |(i, _)| i);
+        let next = buf[cursor..].chars().next().map_or(cursor, |c| cursor + c.len_utf8());
+        match key {
+            "left" => cursor = if !extend && !range.is_empty() { range.start } else { prev },
+            "right" => cursor = if !extend && !range.is_empty() { range.end } else { next },
+            "home" => cursor = 0,
+            "end" => cursor = buf.len(),
+            "backspace" => if range.is_empty() { buf.replace_range(prev..cursor, ""); cursor = prev; },
+            "delete" => if range.is_empty() { buf.replace_range(cursor..next, ""); },
+            _ => if let Some(text) = text {
+                let text: String = text.chars().filter(|c| !c.is_control() && (field != Field::Port || c.is_ascii_digit())).collect();
+                buf.insert_str(cursor, &text);
+                cursor += text.len();
+            }
+        }
+        self.field_cursor = Some((field, cursor));
+        self.field_anchor = if moving && extend { Some((field, anchor)) } else { None };
+    }
+
     pub fn field_order(&self) -> Vec<Field> {
         match self.st.view {
             View::Dialog => {
@@ -1128,6 +1200,8 @@ impl App {
                 if !order.is_empty() {
                     let i = order.iter().position(|f| *f == self.field).map_or(0, |i| i + 1);
                     let next = if m.shift { order[(i + order.len() - 2) % order.len()] } else { order[i % order.len()] };
+                    self.field_cursor = None;
+                    self.field_anchor = None;
                     self.field = next;
                     cx.notify();
                 }
@@ -1146,28 +1220,36 @@ impl App {
             }
             _ => {}
         }
-        if m.control && k.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
-                let line: String = text.chars().filter(|c| !c.is_control()).collect();
-                if let Some(b) = self.field_buf() {
-                    b.push_str(&line);
+        if (m.control || m.platform) && k.key == "a" {
+            let field = self.field;
+            if let Some(buf) = self.field_buf() {
+                let len = buf.len();
+                self.field_anchor = Some((field, 0));
+                self.field_cursor = Some((field, len));
+            }
+        } else if (m.control || m.platform) && matches!(k.key.as_str(), "c" | "x") {
+            let field = self.field;
+            if let (Some((_, a)), Some((_, b))) = (self.field_anchor.filter(|(f, _)| *f == field), self.field_cursor.filter(|(f, _)| *f == field)) {
+                if !matches!(field, Field::Password | Field::PwPass) {
+                    if let Some(buf) = self.field_buf() {
+                        if let Some(text) = buf.get(a.min(b)..a.max(b)).filter(|t| !t.is_empty()) {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                        }
+                    }
+                    if k.key == "x" { self.edit_field("insert", Some(""), false); }
                 }
             }
-        } else if k.key == "backspace" {
-            if let Some(b) = self.field_buf() {
-                b.pop();
+        } else if (m.control || m.platform) && k.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                let line: String = text.chars().filter(|c| !c.is_control()).collect();
+                self.edit_field("insert", Some(&line), false);
             }
+        } else if matches!(k.key.as_str(), "left" | "right" | "home" | "end" | "backspace" | "delete") {
+            self.edit_field(&k.key, None, m.shift);
         } else if !m.control && !m.platform && !m.alt {
             if let Some(ch) = k.key_char.as_deref().filter(|c| c.chars().all(|c| !c.is_control())) {
                 let ch = ch.to_string();
-                if let Some(b) = self.field_buf() {
-                    b.push_str(&ch);
-                }
-                if self.field == Field::Port {
-                    if let Some(f) = &mut self.form {
-                        f.draft.port.retain(|c| c.is_ascii_digit());
-                    }
-                }
+                self.edit_field("insert", Some(&ch), false);
             }
         }
         if self.field == Field::Manage {
@@ -1290,7 +1372,8 @@ impl App {
     /// Open the folder holding a fetched item in the desktop's file manager.
     pub fn show_in_folder(&mut self, path: &std::path::Path) {
         let dir = path.parent().unwrap_or(path);
-        if let Err(e) = std::process::Command::new("xdg-open").arg(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        let opener = if cfg!(target_os = "windows") { "explorer.exe" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        if let Err(e) = std::process::Command::new(opener).arg(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
             log::warn!("could not open {}: {e}", dir.display());
         }
     }

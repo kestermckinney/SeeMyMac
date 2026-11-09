@@ -132,6 +132,7 @@ fn tick_until(cx: &mut VisualTestContext, view: &gpui::Entity<App>, what: &str, 
 }
 
 #[gpui::test]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn close_button_quits_instead_of_dragging_the_window(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(None), None, window, cx));
     draw(cx);
@@ -198,6 +199,55 @@ fn dialog_typing_validation_and_save(cx: &mut TestAppContext) {
         assert_eq!(a.store.connections.len(), 1);
         assert_eq!(a.store.connections[0].name, "My Mac");
     });
+}
+
+#[gpui::test]
+fn text_fields_edit_at_keyboard_and_mouse_cursor(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));
+    cx.simulate_keystrokes("ctrl-n");
+    cx.update(|_, cx| view.update(cx, |a, cx| {
+        a.form.as_mut().unwrap().draft.name = "aéz".into();
+        cx.notify();
+    }));
+    cx.simulate_keystrokes("left backspace");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "az");
+    cx.simulate_keystrokes("x");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "axz");
+    cx.simulate_keystrokes("home delete");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "xz");
+    draw(cx);
+    let bounds = cx.debug_bounds("f-name").unwrap();
+    cx.simulate_click(gpui::point(bounds.left() + gpui::px(11.0), bounds.center().y), gpui::Modifiers::default());
+    cx.simulate_keystrokes("b");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "bxz");
+    cx.simulate_keystrokes("end c");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "bxzc");
+}
+
+#[gpui::test]
+fn text_fields_select_replace_and_cut_unicode(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));
+    cx.simulate_keystrokes("ctrl-n");
+    view.update(cx, |a, _| a.form.as_mut().unwrap().draft.name = "aéz".into());
+    cx.simulate_keystrokes("home shift-right shift-right");
+    cx.simulate_keystrokes("ctrl-c");
+    cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "aé"));
+    cx.simulate_keystrokes("x");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "xz");
+    cx.simulate_keystrokes("ctrl-a backspace");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "");
+    cx.simulate_keystrokes("ctrl-v ctrl-a ctrl-x");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "");
+    cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "aé"));
+    cx.simulate_keystrokes("ctrl-v");
+    draw(cx);
+    let bounds = cx.debug_bounds("f-name").unwrap();
+    let start = gpui::point(bounds.left() + gpui::px(11.0), bounds.center().y);
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_move(bounds.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_keystrokes("q");
+    assert_eq!(view.read_with(cx, |a, _| a.form.as_ref().unwrap().draft.name.clone()), "q");
 }
 
 #[gpui::test]

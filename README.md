@@ -88,8 +88,12 @@ reachable. Remote cursor shapes are not implemented over HP; the local pointer i
 shown instead. Audio from the Mac (AAC-ELD) is decoded by a
 pure-Rust decoder built into SeeMyMac, so no system codec is needed (Fedora's
 `fdk-aac-free` cannot decode AAC-ELD). It plays through PulseAudio or PipeWire via
-libpulse-simple, falling back to `paplay`, `pw-play` or `aplay`; a Flatpak needs
-`--socket=pulseaudio`. `SEEMYMAC_NO_AUDIO=1` turns audio off.
+libpulse-simple on Linux, falling back to `paplay`, `pw-play` or `aplay`; a Flatpak needs
+`--socket=pulseaudio`. Windows uses native shared-mode WASAPI on the default
+multimedia output, with automatic format conversion and a 60 ms target buffer.
+No external audio player or codec is required on Windows. If the output device
+is unavailable or disconnects, the screen-sharing session continues silently.
+`SEEMYMAC_NO_AUDIO=1` turns audio off.
 
 Keyboard: on Wayland (GNOME, KDE and others) SeeMyMac asks the desktop to pass
 its own shortcuts, such as Super, Super+Space and Alt+Tab, to the Mac while a
@@ -118,6 +122,33 @@ The protocol engine is a port of [iShareScreen](https://github.com/renegadelink/
 (AGPL-3.0-or-later), as pinned in SeeMac.
 
 ### Building
+
+On Windows, install the stable Rust MSVC toolchain with Rustup and Visual Studio
+2022's **Desktop development with C++** workload (including the Windows SDK).
+Open a new PowerShell window after installation, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build-windows.ps1 -Test
+.\target\debug\see_my_mac.exe
+```
+
+The script finds the Windows SDK's `fxc.exe` shader compiler for GPUI. Use
+`-Release` for an optimized build, or omit `-Test` to build without tests.
+
+Windows uses Credential Manager for saved passwords and Explorer for fetched
+files. Received files inherit Windows permissions; files sent to a Mac use
+Unix permissions of 0644 (files) or 0755 (folders). Remote audio uses Windows
+WASAPI. The `ui_driver` tool is a Wayland demonstration, not a Windows UI
+automation tool. Automated UI tests use GPUI's headless test platform; the
+ignored live-Mac test requires a configured Mac and saved credentials.
+
+To exercise the real Windows audio device with silence (including buffer
+backpressure, shutdown and reopening), run this after setting `GPUI_FXC_PATH`
+to your SDK's `fxc.exe`:
+
+```powershell
+cargo test --locked --lib wasapi_device_plays_silence_and_releases_cleanly -- --ignored
+```
 
 ```bash
 # Build debug version

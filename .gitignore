@@ -1,4 +1,6 @@
 /target/
+/windows-*.log
+/windows-app.pid
 /.venv/
 /.codegraph/
 /packaging/linux/.*.resolved.yml
