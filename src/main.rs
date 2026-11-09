@@ -26,7 +26,13 @@ fn main() {
                 app_id: Some("seemymac".into()),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| App::with_settings(store, settings, font, window, cx)),
+            |window, cx| {
+                cx.new(|cx| {
+                    let mut app = App::with_settings(store, settings, font, window, cx);
+                    app.shortcuts = Some(see_my_mac::inhibit::Shortcuts::for_window(window));
+                    app
+                })
+            },
         );
         if let Err(e) = opened {
             eprintln!("SeeMyMac could not open its window: {e:#}");

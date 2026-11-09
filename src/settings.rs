@@ -35,6 +35,8 @@ pub struct Settings {
     /// Automatic reconnect attempts after a dropped session (when the connection allows it).
     pub max_reconnects: u32,
     pub command_key: CommandKey,
+    /// Ask the desktop to pass its own shortcuts (Super, Super+Space, Alt+Tab…) to the Mac.
+    pub capture_system_keys: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -48,6 +50,7 @@ impl Default for Settings {
             default_virtual_display: true,
             max_reconnects: 5,
             command_key: CommandKey::SuperIsCommand,
+            capture_system_keys: true,
             path: None,
         }
     }
@@ -109,6 +112,7 @@ mod tests {
         assert_eq!(s.default_proto, Proto::Apple);
         assert_eq!(s.max_reconnects, 5);
         assert!(RECONNECT_CHOICES.contains(&s.max_reconnects));
+        assert!(s.capture_system_keys, "Super and Super+Space reach the Mac by default");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod app;
 pub mod geometry;
 pub mod hp;
+pub mod inhibit;
 pub mod model;
 pub mod rfb;
 pub mod settings;

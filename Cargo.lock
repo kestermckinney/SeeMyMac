@@ -5165,6 +5165,7 @@ dependencies = [
  "pbkdf2",
  "plist",
  "rand 0.8.8",
+ "raw-window-handle",
  "rsa",
  "rust_h264",
  "rust_h265",
@@ -5174,6 +5175,9 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "socket2 0.5.10",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols 0.31.2",
 ]
 
 [[package]]

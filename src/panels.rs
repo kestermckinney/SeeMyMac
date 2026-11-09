@@ -238,6 +238,11 @@ impl App {
                 .flex()
                 .flex_col()
                 .child(form_row("Mac Command key", self.settings_cycle("s-cmd", &CommandKey::ALL, st.command_key, |c| c.label().to_string(), |s, v| s.command_key = v, cx)))
+                .child(form_row(
+                    "System shortcuts",
+                    self.settings_cycle("s-syskeys", &[true, false], st.capture_system_keys, |on| if on { "Send to the Mac (Super, Super+Space, Alt+Tab…)".into() } else { "Keep for this PC".into() }, |s, v| s.capture_system_keys = v, cx),
+                ))
+                .child(div().pb(px(6.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("GNOME asks once whether to allow this. Super+Escape gives the shortcuts back to this PC until you click the session again."))
                 .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Keyboard shortcuts"))
                 .children(
                     [

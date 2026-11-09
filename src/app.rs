@@ -174,6 +174,8 @@ pub struct App {
     last_input: Option<Instant>,
     /// When this PC's clipboard was last checked for text to send.
     clip_checked: Instant,
+    /// System-shortcut inhibitor for the real window (None in tests).
+    pub shortcuts: Option<crate::inhibit::Shortcuts>,
     _poll: Option<Task<()>>,
 }
 
@@ -247,6 +249,7 @@ impl App {
             buttons: 0,
             last_input: None,
             clip_checked: Instant::now(),
+            shortcuts: None,
             _poll: None,
         };
         // Wake for each new picture (so it is drawn at once, not up to a poll

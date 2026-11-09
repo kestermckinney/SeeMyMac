@@ -1025,6 +1025,10 @@ impl Render for App {
         let corner = if NATIVE_FRAME || self.st.full || window.is_maximized() { 0.0 } else { 10.0 };
         self.corner_radius = corner;
         let view = self.st.view;
+        let capture = self.settings.capture_system_keys && view == View::Idle && self.active_session().map_or(false, |s| s.status == Status::Connected);
+        if let Some(s) = &mut self.shortcuts {
+            s.set(capture);
+        }
         let content = self.remote_content(cx);
 
         let area = div()
@@ -1036,6 +1040,9 @@ impl Render for App {
             .bg(rgb(0x000000))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, _| {
                 window.focus(&this.focus);
+                if let Some(s) = &mut this.shortcuts {
+                    s.rearm();
+                }
                 this.pointer(ev.position, Some(1), Some(true));
             }))
             .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer(ev.position, Some(2), Some(true))))

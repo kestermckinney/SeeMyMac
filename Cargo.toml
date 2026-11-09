@@ -38,6 +38,13 @@ socket2 = "0.5"
 # Wakes the UI as soon as a new remote picture is ready (instead of polling).
 async-channel = "2"
 futures-lite = "2"
+raw-window-handle = "0.6"
+
+# Passes system shortcuts (Super, Super+Space) to the Mac on Wayland (src/inhibit.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
 
 [profile.dev.package.see_my_mac]
 # Frame conversion runs per pixel; unoptimised code is far too slow for live video.

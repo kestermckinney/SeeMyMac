@@ -91,6 +91,12 @@ pure-Rust decoder built into SeeMyMac, so no system codec is needed (Fedora's
 libpulse-simple, falling back to `paplay`, `pw-play` or `aplay`; a Flatpak needs
 `--socket=pulseaudio`. `SEEMYMAC_NO_AUDIO=1` turns audio off.
 
+Keyboard: on Wayland (GNOME, KDE and others) SeeMyMac asks the desktop to pass
+its own shortcuts, such as Super, Super+Space and Alt+Tab, to the Mac while a
+connected session has focus (Settings → Input → System shortcuts). GNOME asks once
+whether to allow it; Super+Escape gives the shortcuts back to this PC, and clicking
+the session sends them to the Mac again. X11 sessions keep the desktop's shortcuts.
+
 Clipboard: text copied on either side is pasted on the other, over HP and plain
 VNC, while the connection's **Local resources → Clipboard** option is on. Macs
 get Apple's own pasteboard messages (any character; modern apps see the text);
