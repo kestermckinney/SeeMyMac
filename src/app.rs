@@ -89,6 +89,21 @@ pub struct Session {
     /// The clipboard text both sides last agreed on (sent there or received from
     /// there), so a change is sent once and the remote's own text is not echoed.
     clip_synced: Option<String>,
+    /// Apple: what the latest file drop onto the screen is doing.
+    pub file_note: Option<FileNote>,
+    /// The files last copied in Finder on the Mac.
+    pub mac_files: Vec<String>,
+}
+
+/// The status line for a file drop: it stays while sending, then fades.
+pub struct FileNote {
+    pub text: String,
+    pub error: bool,
+    pub until: Option<Instant>,
+    /// A saved item the "Show in folder" button opens the folder of.
+    pub reveal: Option<std::path::PathBuf>,
+    /// Paths on the Mac offered by a "Get" button (files copied in Finder there).
+    pub fetch: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,6 +118,10 @@ pub enum Field {
     Manage,
     PwUser,
     PwPass,
+    /// The path asked for by "Get file from Mac".
+    GetPath,
+    /// Settings: the folder fetched files are saved in.
+    Download,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,6 +183,8 @@ pub struct App {
     pub quick: String,
     pub form: Option<Form>,
     pub pw: Option<PwPrompt>,
+    /// "Get file from Mac": the path typed so far and any complaint.
+    pub get_file: Option<(String, Option<String>)>,
     pub font: Option<SharedString>,
     /// Remote-screen area in window coordinates, updated on every render.
     pub area: Rc<Cell<Bounds<Pixels>>>,
@@ -242,6 +263,7 @@ impl App {
             quick: String::new(),
             form: None,
             pw: None,
+            get_file: None,
             font,
             area: Rc::new(Cell::new(Bounds::default())),
             held_keys: HashMap::new(),
@@ -312,6 +334,8 @@ impl App {
                 offset: (0, 0),
                 multi_applied: false,
                 clip_synced: None,
+                file_note: None,
+                mac_files: vec![],
             };
             self.sessions.insert(id.to_string(), session);
             self.begin_login(id, window, cx);
@@ -507,6 +531,28 @@ impl App {
                             s.clip_synced = Some(text);
                         }
                     }
+                    Event::ServerFiles(paths) => {
+                        // Not while a copy is running: its notice is more useful.
+                        if !s.file_note.as_ref().map_or(false, |n| n.until.is_none()) {
+                            let first = paths[0].rsplit('/').next().unwrap_or(&paths[0]).to_string();
+                            let text = if paths.len() == 1 { format!("Copied on the Mac: {first}") } else { format!("Copied on the Mac: {first} and {} more", paths.len() - 1) };
+                            s.file_note = Some(FileNote { text, error: false, until: Some(Instant::now() + Duration::from_secs(20)), reveal: None, fetch: paths.clone() });
+                        }
+                        s.mac_files = paths;
+                    }
+                    Event::FileCopy(p) => {
+                        use crate::hp::filecopy::Progress;
+                        let fade = |secs| Some(Instant::now() + Duration::from_secs(secs));
+                        s.file_note = Some(match p {
+                            Progress::Receiving { name, got, total } if total > 0 => FileNote { text: format!("Receiving {name}… {}%", got.min(total) * 100 / total), error: false, until: None, reveal: None, fetch: vec![] },
+                            Progress::Receiving { name, .. } => FileNote { text: format!("Receiving {name}…"), error: false, until: None, reveal: None, fetch: vec![] },
+                            Progress::Received { saved } => FileNote { text: format!("Saved to {}", saved.display()), error: false, until: fade(15), reveal: Some(saved), fetch: vec![] },
+                            Progress::Sending { name, sent, total } if total > 0 => FileNote { text: format!("Sending {name}… {}%", (sent.min(total) * 100 / total)), error: false, until: None, reveal: None, fetch: vec![] },
+                            Progress::Sending { name, .. } => FileNote { text: format!("Sending {name}…"), error: false, until: None, reveal: None, fetch: vec![] },
+                            Progress::Done { name } => FileNote { text: format!("Copied {name} to the Mac’s Desktop"), error: false, until: fade(4), reveal: None, fetch: vec![] },
+                            Progress::Failed { name, reason } => FileNote { text: format!("Could not copy {name}. {reason}"), error: true, until: fade(10), reveal: None, fetch: vec![] },
+                        });
+                    }
                     Event::Disconnected(reason) => {
                         s.handle = None;
                         let reason = reason.unwrap_or_else(|| "The remote computer closed the connection.".into());
@@ -523,6 +569,11 @@ impl App {
                         }
                     }
                 }
+            }
+
+            if s.file_note.as_ref().map_or(false, |n| n.until.map_or(false, |t| Instant::now() >= t)) {
+                s.file_note = None;
+                changed = true;
             }
 
             if matches!(s.status, Status::Connecting | Status::Reconnecting) || (s.status == Status::Connected && s.tiles.is_empty()) {
@@ -704,6 +755,61 @@ impl App {
         cx.notify();
     }
 
+    // ----- get a file from the Mac ---------------------------------------------
+
+    /// Fetch files copied in Finder on the Mac (the "Get" button on the notice).
+    pub fn fetch_mac_files(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let dest = self.settings.download_path();
+        let user = self.mac_user();
+        for entry in paths {
+            self.send(Input::GetFile { paths: mac_candidates(&entry, &user), dest: dest.clone() });
+        }
+        if let Some(s) = self.st.active.clone().and_then(|id| self.sessions.get_mut(&id)) {
+            s.file_note = None;
+        }
+        cx.notify();
+    }
+
+    /// The Mac account the session signed in with (its home is /Users/<name>).
+    fn mac_user(&self) -> String {
+        let s = self.active_session().map(|s| s.user.clone()).filter(|u| !u.is_empty());
+        s.or_else(|| self.active_conn().map(|c| c.user.clone())).unwrap_or_default()
+    }
+
+    pub fn open_get_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Whatever was last copied in Finder on the Mac is offered as the path.
+        let copied = self.active_session().and_then(|s| s.mac_files.first().cloned()).unwrap_or_default();
+        self.get_file = Some((copied, None));
+        self.st.set_view(View::GetFile);
+        self.field = Field::GetPath;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    pub fn submit_get_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, _)) = self.get_file.clone() else { return };
+        let path = path.trim().to_string();
+        let problem = if path.is_empty() {
+            Some("Enter a file name, or the full path on the Mac (for example /Users/me/Documents/report.pdf).")
+        } else if !self.active_session().map_or(false, |s| s.status == Status::Connected) || !self.active_conn().map_or(false, |c| c.proto == Proto::Apple) {
+            Some("Connect to a Mac with Apple HP first.")
+        } else {
+            None
+        };
+        if let Some(p) = problem {
+            self.get_file = Some((path, Some(p.into())));
+            cx.notify();
+            return;
+        }
+        let paths = mac_candidates(&path, &self.mac_user());
+        self.send(Input::GetFile { paths, dest: self.settings.download_path() });
+        self.get_file = None;
+        self.st.close_overlay();
+        self.field = Field::None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
     // ----- menu / quick connect --------------------------------------------
 
     pub fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -721,6 +827,7 @@ impl App {
         }
         match self.st.view {
             View::Password => return self.cancel_password(window, cx),
+            View::GetFile => self.get_file = None,
             View::Dialog => {
                 self.leave_dialog();
                 window.focus(&self.focus);
@@ -991,6 +1098,8 @@ impl App {
             Field::User => self.form.as_mut().map(|f| &mut f.draft.user),
             Field::Password => self.form.as_mut().map(|f| &mut f.password),
             Field::Manage => Some(&mut self.manage_query),
+            Field::GetPath => self.get_file.as_mut().map(|g| &mut g.0),
+            Field::Download => Some(&mut self.settings.download_dir),
             Field::None => None,
         }
     }
@@ -1028,6 +1137,7 @@ impl App {
                 match self.st.view {
                     View::Menu => self.quick_connect(window, cx),
                     View::Password => self.submit_password(window, cx),
+                    View::GetFile => self.submit_get_file(window, cx),
                     View::Dialog => self.save_form(true, window, cx),
                     View::Manage | View::Settings => {}
                     _ => {}
@@ -1177,6 +1287,27 @@ impl App {
         }
     }
 
+    /// Open the folder holding a fetched item in the desktop's file manager.
+    pub fn show_in_folder(&mut self, path: &std::path::Path) {
+        let dir = path.parent().unwrap_or(path);
+        if let Err(e) = std::process::Command::new("xdg-open").arg(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+            log::warn!("could not open {}: {e}", dir.display());
+        }
+    }
+
+    /// Files dropped onto the remote screen: copy them to the Mac (Apple sessions only).
+    pub fn drop_files(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let Some(s) = self.active_session() else { return };
+        if s.status != Status::Connected || paths.is_empty() {
+            return;
+        }
+        if !self.active_conn().map_or(false, |c| c.proto == Proto::Apple) {
+            return;
+        }
+        self.send(Input::SendFiles(paths));
+        cx.notify();
+    }
+
     pub fn send_ctrl_alt_del(&self) {
         self.send_key_combo(0);
     }
@@ -1292,6 +1423,23 @@ const CLIPBOARD_POLL: Duration = Duration::from_millis(750);
 
 /// Clipboard texts that differ only in line endings or trailing space are the same
 /// (otherwise a round trip through the Mac would bounce back and forth).
+/// Where on the Mac to look for what the user named: a full path as it is, `~/…` in
+/// the signed-in account's home, and a bare file name in the places files usually are.
+fn mac_candidates(entry: &str, user: &str) -> Vec<String> {
+    let entry = entry.trim();
+    let home = if user.is_empty() { "/Users/Shared".to_string() } else { format!("/Users/{user}") };
+    if entry.starts_with('/') {
+        return vec![entry.to_string()];
+    }
+    if entry == "~" {
+        return vec![home];
+    }
+    if let Some(rest) = entry.strip_prefix("~/") {
+        return vec![format!("{home}/{rest}")];
+    }
+    ["Desktop", "Documents", "Downloads", ""].iter().map(|d| if d.is_empty() { format!("{home}/{entry}") } else { format!("{home}/{d}/{entry}") }).collect()
+}
+
 fn same_clip(a: &str, b: &str) -> bool {
     let n = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
     n(a) == n(b)
@@ -1372,4 +1520,19 @@ fn layout_screens(layout: &[[u32; 4]], w: u32, h: u32) -> Option<Vec<geometry_sc
 /// Local alias so `app.rs` need not import the type with a long path.
 mod geometry_screen {
     pub use crate::rfb::Screen;
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::mac_candidates;
+
+    #[test]
+    fn names_and_paths_on_the_mac() {
+        assert_eq!(mac_candidates("/Volumes/X/a.txt", "me"), ["/Volumes/X/a.txt"]);
+        assert_eq!(mac_candidates("~/Documents/a.txt", "me"), ["/Users/me/Documents/a.txt"]);
+        assert_eq!(
+            mac_candidates("a.txt", "me"),
+            ["/Users/me/Desktop/a.txt", "/Users/me/Documents/a.txt", "/Users/me/Downloads/a.txt", "/Users/me/a.txt"]
+        );
+    }
 }

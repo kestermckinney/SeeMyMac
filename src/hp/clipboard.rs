@@ -141,6 +141,87 @@ pub fn text(msg: &[u8]) -> Option<String> {
     pick(&|u| u == "com.apple.traditional-mac-plain-text").map(|(_, d)| d.iter().map(|&b| b as char).collect())
 }
 
+/// Files and folders on the Mac that a complete 0x1f message stands for (paths,
+/// or bare names for a Finder Copy), and the item types it held.
+pub fn files(msg: &[u8]) -> (Vec<String>, Vec<String>) {
+    let Some(items) = unpack(msg) else { return (vec![], vec![]) };
+    // Type and size of every item, and the message's promise flag (byte 2), for the log.
+    let types = items.iter().map(|(u, d)| format!("{u} ({} bytes, promise flag {})", d.len(), msg[2])).collect();
+    let mut paths: Vec<String> = vec![];
+    // Finder's Copy on a file puts its name (as text) and its icon on the pasteboard
+    // but no path; the names are returned for the caller to look for.
+    let icon = items.iter().any(|(u, _)| u == "com.apple.icns");
+    for (uti, d) in &items {
+        if uti == "public.file-url" || uti.ends_with("promised-file-url") {
+            let url = String::from_utf8_lossy(d);
+            if let Some(p) = file_url_path(url.trim_matches(|c: char| c == '\0' || c.is_whitespace())) {
+                if !paths.contains(&p) {
+                    paths.push(p);
+                }
+            }
+        }
+    }
+    if paths.is_empty() && icon {
+        if let Some((_, d)) = items.iter().find(|(u, _)| u == "public.utf8-plain-text") {
+            for line in String::from_utf8_lossy(d).lines() {
+                let name = line.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+                if !name.is_empty() && name.chars().count() < 256 && !paths.iter().any(|p| p == name) {
+                    paths.push(name.to_owned());
+                }
+            }
+        }
+    }
+    (paths, types)
+}
+
+/// `file:///Users/me/a%20b.txt` to `/Users/me/a b.txt`.
+fn file_url_path(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let b = path.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&path[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    let p = String::from_utf8(out).ok()?;
+    Some(if p.len() > 1 { p.trim_end_matches('/').to_owned() } else { p })
+}
+
+/// The items of a complete 0x1f message.
+fn unpack(msg: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    if msg.len() < 16 || msg[0] != MSG_SEND {
+        return None;
+    }
+    let size = u32::from_be_bytes(msg[8..12].try_into().unwrap()) as usize;
+    if size == 0 || size > MAX_UNCOMPRESSED {
+        return None;
+    }
+    let mut out = Vec::with_capacity(size);
+    let mut z = Decompress::new(true);
+    let input = &msg[16..];
+    while out.len() < size {
+        let at = z.total_in() as usize;
+        let st = z.decompress_vec(&input[at..], &mut out, FlushDecompress::Sync).ok()?;
+        if st == Status::StreamEnd || (z.total_in() as usize == input.len() && out.len() < out.capacity()) {
+            break;
+        }
+        out.reserve(size - out.len());
+    }
+    items(&out)
+}
+
 fn items(d: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     let mut p = 0usize;
     let u32_at = |p: &mut usize| -> Option<u32> {
@@ -212,6 +293,15 @@ mod tests {
         assert_eq!(enable(), [0x15, 0, 0, 1, 0, 0, 0, 0]);
         assert_eq!(status_command(&[0x14, 0, 0, 4, 0, 1, 0, 2]), Some(STATUS_CLIPBOARD_CHANGED));
         assert_eq!(status_command(&[0x00, 0, 0, 4, 0, 1, 0, 2]), None);
+    }
+
+    #[test]
+    fn finder_copies_give_file_paths() {
+        assert_eq!(file_url_path("file:///Users/me/a%20b%C3%A9.txt").as_deref(), Some("/Users/me/a bé.txt"));
+        assert_eq!(file_url_path("file://localhost/Users/me/Folder/").as_deref(), Some("/Users/me/Folder"));
+        assert_eq!(file_url_path("https://x/y"), None);
+        // %41 at the very end of the string is still decoded.
+        assert_eq!(file_url_path("file:///a%41").as_deref(), Some("/aA"));
     }
 
     #[test]

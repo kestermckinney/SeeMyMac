@@ -5,7 +5,7 @@
 //! Diffie-Hellman (30). Supported encodings: ZRLE, Raw, CopyRect, DesktopSize and
 //! ExtendedDesktopSize (used to discover multiple monitors).
 
-use crate::hp::clipboard;
+use crate::hp::{clipboard, filecopy};
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use anyhow::{anyhow, bail, Context, Result};
 use md5::{Digest, Md5};
@@ -160,6 +160,10 @@ pub enum Event {
     /// Connection ended; `Some(reason)` when it failed or was dropped.
     Disconnected(Option<String>),
     ServerClipboard(String),
+    /// Apple only: a file or folder dropped onto the screen is being copied to the Mac.
+    FileCopy(filecopy::Progress),
+    /// Apple: files or folders were copied in Finder on the Mac (their paths there).
+    ServerFiles(Vec<String>),
 }
 
 #[derive(Debug)]
@@ -178,6 +182,10 @@ pub enum Input {
     PointerTarget(u8),
     /// Put this text on the remote clipboard.
     Clipboard(String),
+    /// Apple: copy these files and folders to the Mac. Ignored by plain VNC.
+    SendFiles(Vec<std::path::PathBuf>),
+    /// Apple: fetch this path from the Mac into the local folder `dest`. Ignored by plain VNC.
+    GetFile { paths: Vec<String>, dest: std::path::PathBuf },
 }
 
 /// The input channel as the network side reads it: a run of queued pointer
@@ -334,6 +342,11 @@ fn run(
     // Writes come from two threads (update requests and user input).
     let writer = Arc::new(Mutex::new(stream.try_clone()?));
     let w2 = writer.clone();
+    let transfers = Arc::new(filecopy::Transfers::default());
+    let tr2 = transfers.clone();
+    let ev2 = events.clone();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stopped.clone();
     std::thread::spawn(move || {
         let mut input = InputQueue::new(input);
         while let Ok(i) = input.recv() {
@@ -353,7 +366,23 @@ fn run(
                 // (and carries any character); ClientCutText is Latin-1 only.
                 Input::Clipboard(text) if apple => clipboard::send(&text).concat(),
                 Input::Clipboard(text) => client_cut_text(&text),
-                Input::UseVirtualDisplay { .. } | Input::ShowDisplay(_) | Input::PointerTarget(_) => continue,
+                Input::SendFiles(paths) if apple => {
+                    let (w, tr, ev, stop) = (w2.clone(), tr2.clone(), ev2.clone(), stop2.clone());
+                    std::thread::spawn(move || {
+                        let mut send = |m: &[u8]| w.lock().unwrap().write_all(m);
+                        filecopy::send_paths(&paths, filecopy::DEFAULT_DEST, &tr, &mut send, &|p| drop(ev.send(Event::FileCopy(p))), &|| stop.load(std::sync::atomic::Ordering::Relaxed));
+                    });
+                    continue;
+                }
+                Input::GetFile { paths, dest } if apple => {
+                    let (w, tr, ev, stop) = (w2.clone(), tr2.clone(), ev2.clone(), stop2.clone());
+                    std::thread::spawn(move || {
+                        let mut send = |m: &[u8]| w.lock().unwrap().write_all(m);
+                        filecopy::get_path(&paths, &dest, &tr, &mut send, &|p| drop(ev.send(Event::FileCopy(p))), &|| stop.load(std::sync::atomic::Ordering::Relaxed));
+                    });
+                    continue;
+                }
+                Input::SendFiles(_) | Input::GetFile { .. } | Input::UseVirtualDisplay { .. } | Input::ShowDisplay(_) | Input::PointerTarget(_) => continue,
             };
             if w2.lock().unwrap().write_all(&msg).is_err() {
                 break;
@@ -361,7 +390,9 @@ fn run(
         }
     });
 
-    read_loop(&mut stream, &writer, fb, events)
+    let result = read_loop(&mut stream, &writer, fb, events, &transfers);
+    stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+    result
 }
 
 #[derive(Debug)]
@@ -591,6 +622,7 @@ fn read_loop(
     writer: &Arc<Mutex<TcpStream>>,
     fb: &Arc<Mutex<Framebuffer>>,
     events: &Sender<Event>,
+    transfers: &filecopy::Transfers,
 ) -> Result<()> {
     let mut zrle = Zrle::new();
     loop {
@@ -648,6 +680,25 @@ fn read_loop(
                 m.extend_from_slice(&read_exact_n(stream, n)?);
                 if let Some(text) = clipboard::text(&m) {
                     events.send(Event::ServerClipboard(text)).ok();
+                }
+                let (files, types) = clipboard::files(&m);
+                log::debug!("Mac pasteboard types: {types:?}");
+                if !files.is_empty() {
+                    events.send(Event::ServerFiles(files)).ok();
+                }
+            }
+            // Apple file copy: progress and the final status of a drop sent to the Mac.
+            filecopy::MSG => {
+                let h = read_exact_n(stream, 5)?;
+                let n = u32::from_be_bytes(h[1..5].try_into().unwrap()) as usize;
+                if n > 1 << 20 {
+                    bail!("file copy message too large");
+                }
+                let mut m = vec![filecopy::MSG];
+                m.extend_from_slice(&h);
+                m.extend_from_slice(&read_exact_n(stream, n)?);
+                if let Some(r) = filecopy::parse_reply(&m) {
+                    transfers.dispatch(r);
                 }
             }
             t => bail!("unsupported server message type {t}"),

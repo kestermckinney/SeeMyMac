@@ -37,6 +37,8 @@ pub struct Settings {
     pub command_key: CommandKey,
     /// Ask the desktop to pass its own shortcuts (Super, Super+Space, Alt+Tab…) to the Mac.
     pub capture_system_keys: bool,
+    /// Where files fetched from the Mac are saved (`~` is this user's home).
+    pub download_dir: String,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -51,6 +53,7 @@ impl Default for Settings {
             max_reconnects: 5,
             command_key: CommandKey::SuperIsCommand,
             capture_system_keys: true,
+            download_dir: "~/Downloads".into(),
             path: None,
         }
     }
@@ -84,6 +87,20 @@ impl Settings {
         std::fs::rename(tmp, path)
     }
 
+    /// The folder for files fetched from the Mac, with `~` expanded.
+    pub fn download_path(&self) -> PathBuf {
+        let d = self.download_dir.trim();
+        let home = || dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        match d {
+            "" => home().join("Downloads"),
+            "~" => home(),
+            _ => match d.strip_prefix("~/") {
+                Some(rest) => home().join(rest),
+                None => PathBuf::from(d),
+            },
+        }
+    }
+
     /// Fill a brand-new connection with the user's defaults.
     pub fn apply_defaults(&self, c: &mut Connection) {
         c.proto = self.default_proto;
@@ -112,6 +129,8 @@ mod tests {
         assert_eq!(s.default_proto, Proto::Apple);
         assert_eq!(s.max_reconnects, 5);
         assert!(RECONNECT_CHOICES.contains(&s.max_reconnects));
+        assert_eq!(s.download_dir, "~/Downloads");
+        assert!(s.download_path().ends_with("Downloads"));
         assert!(s.capture_system_keys, "Super and Super+Space reach the Mac by default");
     }
 

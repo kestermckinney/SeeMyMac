@@ -18,6 +18,7 @@ pub mod auth;
 pub mod clipboard;
 pub mod crypto;
 pub mod decode;
+pub mod filecopy;
 pub mod negotiate;
 pub mod net;
 pub mod offers;

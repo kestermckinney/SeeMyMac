@@ -16,6 +16,8 @@ pub enum View {
     Settings,
     /// Asks for a password when a connection uses "Ask when connecting".
     Password,
+    /// Asks for the path of a file or folder on the Mac to copy here.
+    GetFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

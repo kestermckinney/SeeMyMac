@@ -427,6 +427,31 @@ impl App {
             .child(Self::popup_list(id, &labels, current, on_pick, cx).absolute().top(px(2.0)).right(px(8.0)).w(px(220.0)))
     }
 
+    /// The progress or result of a file drop, at the bottom of the screen.
+    fn file_note(n: &crate::app::FileNote, cx: &mut Context<Self>) -> impl IntoElement {
+        let reveal = n.reveal.clone();
+        let fetch = n.fetch.clone();
+        div().absolute().bottom(px(16.0)).left_0().right_0().flex().justify_center().child(
+            div()
+                .id("file-note")
+                .debug_selector(|| "file-note".into())
+                .occlude()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(14.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(rgba(0x0D1117E6))
+                .border_1()
+                .border_color(if n.error { rgb(0xE5534B) } else { rgb(BORDER) })
+                .text_size(px(12.0))
+                .child(n.text.clone())
+                .children(reveal.map(|p| secondary_btn("file-note-show", "Show in folder").on_click(cx.listener(move |this, _, _, _| this.show_in_folder(&p)))))
+                .children((!fetch.is_empty()).then(|| primary_btn("file-note-get", "Get").on_click(cx.listener(move |this, _, _, cx| this.fetch_mac_files(fetch.clone(), cx))))),
+        )
+    }
+
     /// Shown while an Apple HP session that wants a virtual display is still on the
     /// Mac's own screen (where a locked Mac shows its login window).
     fn virtual_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -731,6 +756,7 @@ impl App {
             .child(div().h(px(1.0)).bg(rgb(DIVIDER)).mt(px(6.0)))
             .child(action("act-new", "New connection…", "Ctrl+N").on_click(cx.listener(|this, _, window, cx| this.new_connection_dialog(window, cx))))
             .child(action("act-manage", "Manage all connections…", "Ctrl+M").on_click(cx.listener(|this, _, window, cx| this.open_manage(window, cx))))
+            .child(action("act-getfile", "Get file from Mac…", "").on_click(cx.listener(|this, _, window, cx| this.open_get_file(window, cx))))
             .child(action("act-settings", "Settings", "Ctrl+,").on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))))
     }
 
@@ -998,6 +1024,53 @@ impl App {
             .into_any_element()
     }
 
+    fn get_file_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((path, problem)) = &self.get_file else { return div().into_any_element() };
+        div()
+            .id("gf-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .bg(rgba(0x010409B3))
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("gf")
+                    .debug_selector(|| "gf".into())
+                    .w(px(480.0))
+                    .rounded(px(12.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .p(px(20.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child("Get file from Mac"))
+                    .child(label_text("Path of the file or folder on the Mac"))
+                    .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child("Type a file name (looked for on the Mac's Desktop, Documents and Downloads) or a full path. Or copy a file in Finder on the Mac with Cmd+C and click Get."))
+                    .child(self.text_field("gf-path", Field::GetPath, path, "neopass.txt or /Users/name/Documents/report.pdf", false, cx))
+                    .children(problem.clone().map(|e| div().text_color(rgb(DANGER)).text_size(px(12.0)).child(e)))
+                    .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(format!("It is saved in {}. Change that folder in Settings.", self.settings.download_path().display())))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .mt(px(6.0))
+                            .child(secondary_btn("gf-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx))))
+                            .child(primary_btn("gf-ok", "Get file").on_click(cx.listener(|this, _, window, cx| this.submit_get_file(window, cx)))),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn resize_handles(&self) -> impl IntoElement {
         let edge = |id: &'static str, e: ResizeEdge, cursor: CursorStyle| {
             div().id(id).absolute().cursor(cursor).on_mouse_down(MouseButton::Left, move |_, window, _| window.start_window_resize(e))
@@ -1051,6 +1124,7 @@ impl Render for App {
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, ev: &MouseUpEvent, _, _| this.pointer(ev.position, Some(2), Some(false))))
             .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| this.pointer(ev.position, Some(4), Some(false))))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| this.pointer(ev.position, None, None)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.drop_files(paths.paths().to_vec(), cx)))
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, _| {
                 let dy = match ev.delta {
                     ScrollDelta::Pixels(p) => f32::from(p.y),
@@ -1060,6 +1134,7 @@ impl Render for App {
             }))
             .child(content)
             .when(!self.st.pinned, |d| d.child(self.pull_tab(cx)))
+            .when_some(self.active_session().and_then(|s| s.file_note.as_ref()), |d, n| d.child(Self::file_note(n, cx)))
             .when(view == View::Idle && self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| d.child(self.virtual_banner(cx)))
             .when(view == View::Menu, |d| {
                 d.child(
@@ -1073,7 +1148,8 @@ impl Render for App {
             .when(view == View::Dialog, |d| d.child(self.dialog(cx)))
             .when(view == View::Manage, |d| d.child(self.manage_panel(cx)))
             .when(view == View::Settings, |d| d.child(self.settings_panel(cx)))
-            .when(view == View::Password, |d| d.child(self.password_prompt(cx)));
+            .when(view == View::Password, |d| d.child(self.password_prompt(cx)))
+            .when(view == View::GetFile, |d| d.child(self.get_file_prompt(cx)));
 
         div()
             .id("root")

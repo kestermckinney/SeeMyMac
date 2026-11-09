@@ -3,6 +3,7 @@
 
 use super::crypto::{aes128_ecb_encrypt, Enc1103Rx, Enc1103Tx, SrtcpRx, SrtcpTx, SrtpRx, SrtpTx, SRTP_BLOB_LEN};
 use super::clipboard;
+use super::filecopy;
 use super::decode::{hevc_type, Codec, Picture, VideoDecoder};
 use super::negotiate::{self, fbu_request, Negotiated, Params};
 use super::net::{self, is_timeout};
@@ -295,6 +296,8 @@ impl Media {
 struct Control {
     w: Mutex<(Enc1103Tx, TcpStream)>,
     cbc_key: [u8; 16],
+    /// Files being copied to the Mac, waiting for its replies.
+    transfers: filecopy::Transfers,
 }
 
 impl Control {
@@ -867,6 +870,19 @@ fn handle_control(ctx: &Ctx, m: &[u8]) {
     }
 }
 
+/// File-copy replies (0x22: progress and end status of a drop); true when `m` was one.
+fn handle_filecopy(ctx: &Ctx, fc: &mut filecopy::Reader, m: &[u8]) -> bool {
+    if !fc.in_progress() && m.first() != Some(&filecopy::MSG) {
+        return false;
+    }
+    if let Some(full) = fc.feed(m) {
+        if let Some(r) = filecopy::parse_reply(&full) {
+            ctx.control.transfers.dispatch(r);
+        }
+    }
+    true
+}
+
 /// Clipboard records (0x14 change notices, 0x1f contents); true when `m` was one.
 fn handle_clipboard(ctx: &Ctx, clip: &mut clipboard::Reassembler, m: &[u8]) -> bool {
     if clip.in_progress() || m.first() == Some(&clipboard::MSG_SEND) {
@@ -876,11 +892,19 @@ fn handle_clipboard(ctx: &Ctx, clip: &mut clipboard::Reassembler, m: &[u8]) -> b
                 log::info!("HP clipboard: {} characters from the Mac", t.chars().count());
                 let _ = ctx.events.send(Event::ServerClipboard(t));
             }
+            let (files, types) = clipboard::files(&full);
+            log::debug!("Mac pasteboard types: {types:?}");
+            if !files.is_empty() {
+                log::info!("HP clipboard: {} file(s) copied on the Mac", files.len());
+                let _ = ctx.events.send(Event::ServerFiles(files));
+            }
         }
         return true;
     }
     if clipboard::status_command(m) == Some(clipboard::STATUS_CLIPBOARD_CHANGED) {
+        log::debug!("Mac pasteboard changed; fetching it");
         let _ = ctx.control.send(&clipboard::fetch());
+
         return true;
     }
     false
@@ -888,8 +912,9 @@ fn handle_clipboard(ctx: &Ctx, clip: &mut clipboard::Reassembler, m: &[u8]) -> b
 
 fn tcp_reader(ctx: Arc<Ctx>, mut s: TcpStream, mut rx: Enc1103Rx, leftover: Vec<Vec<u8>>) {
     let mut clip = clipboard::Reassembler::default();
+    let mut fc = filecopy::Reader::default();
     for m in &leftover {
-        if !handle_clipboard(&ctx, &mut clip, m) {
+        if !handle_filecopy(&ctx, &mut fc, m) && !handle_clipboard(&ctx, &mut clip, m) {
             handle_control(&ctx, m);
         }
     }
@@ -903,7 +928,7 @@ fn tcp_reader(ctx: Arc<Ctx>, mut s: TcpStream, mut rx: Enc1103Rx, leftover: Vec<
             }
             Ok(n) => {
                 for m in rx.feed(&buf[..n]) {
-                    if !handle_clipboard(&ctx, &mut clip, &m) {
+                    if !handle_filecopy(&ctx, &mut fc, &m) && !handle_clipboard(&ctx, &mut clip, &m) {
                         handle_control(&ctx, &m);
                     }
                 }
@@ -1127,7 +1152,7 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Fr
     let mut hb = SrtpTx::new(&keys.audio_v, offers.audio_ssrc);
     let st0 = start.srtp.state(start.ssrc);
     let (offers, keys) = (Arc::new(offers), Arc::new(keys));
-    let control = Arc::new(Control { w: Mutex::new((tx, stream.try_clone()?)), cbc_key });
+    let control = Arc::new(Control { w: Mutex::new((tx, stream.try_clone()?)), cbc_key, transfers: filecopy::Transfers::default() });
     let (layout, halt) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
     // Connecting straight onto two virtual displays (otherwise "Use virtual display" sets it).
     let dual = Arc::new(AtomicBool::new(dual_wanted && cfg.virtual_display));
@@ -1280,6 +1305,22 @@ pub fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, fb2: Option<&Arc<Mutex<Fr
                     ctx.control.send(&fbu_request(false, 0xffff, 0xffff))?;
                     let mut sh = ctx.shared.lock().unwrap();
                     ctx.media.keyframe(&mut sh, true);
+                }
+                Ok(Input::SendFiles(paths)) => {
+                    log::info!("HP file copy: {} item(s) to the Mac", paths.len());
+                    let c = ctx.clone();
+                    thread::Builder::new().name("hp-filecopy".into()).spawn(move || {
+                        let mut send = |m: &[u8]| c.control.send(m);
+                        filecopy::send_paths(&paths, filecopy::DEFAULT_DEST, &c.control.transfers, &mut send, &|p| drop(c.events.send(Event::FileCopy(p))), &|| c.halted())
+                    })?;
+                }
+                Ok(Input::GetFile { paths, dest }) => {
+                    log::info!("HP file copy: fetching a file from the Mac");
+                    let c = ctx.clone();
+                    thread::Builder::new().name("hp-filecopy".into()).spawn(move || {
+                        let mut send = |m: &[u8]| c.control.send(m);
+                        filecopy::get_path(&paths, &dest, &c.control.transfers, &mut send, &|p| drop(c.events.send(Event::FileCopy(p))), &|| c.halted())
+                    })?;
                 }
                 Ok(Input::Clipboard(text)) => {
                     log::info!("HP clipboard: {} characters to the Mac", text.chars().count());
