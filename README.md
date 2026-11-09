@@ -170,3 +170,7 @@ The VNC client currently targets macOS Screen Sharing. Planned work to make it a
 - **Extension messages:** tolerate or implement unknown server messages (such as fence) instead of dropping the connection.
 - **Form options for VNC:** make color depth, resolution and local resources take effect, or hide them where they do not apply.
 - **Tunnelling:** an SSH tunnel or gateway host option for reaching VNC servers behind a jump host.
+# License
+
+SeeMyMac's original code is licensed under the MIT License (see [LICENSE](LICENSE)). Third-party components are subject to their own licenses, including the Fraunhofer FDK AAC license for the audio decoder.
+
