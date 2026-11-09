@@ -1,3 +1,11 @@
 /target/
 /.venv/
 /.codegraph/
+/packaging/linux/.*.resolved.yml
+/packaging/linux/.generator-venv/
+/packaging/linux/.flatpak-cargo-generator.py
+/packaging/linux/flatpak-build/
+/packaging/linux/flatpak-repo/
+/packaging/linux/*.flatpak
+/public/
+/.release-secrets/

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.gitlab.kestermckinney.SeeMyMac</id>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+
+  <name>SeeMyMac</name>
+  <summary>Remote desktop client for Macs</summary>
+
+  <developer id="io.gitlab.kestermckinney">
+    <name>Kester McKinney</name>
+  </developer>
+
+  <description>
+    <p>
+      SeeMyMac lets you view and control a Mac from Linux. It speaks Apple's
+      High Performance Screen Sharing protocol natively, with plain VNC as a
+      fallback.
+    </p>
+    <p>
+      Clipboard text sync, audio playback from the Mac, copying files to and
+      from the Mac, and system shortcuts such as Super are passed through to
+      the remote desktop.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.gitlab.kestermckinney.SeeMyMac.desktop</launchable>
+
+  <url type="homepage">https://gitlab.com/kestermckinney/SeeMyMac</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-08"/>
+  </releases>
+
+  <provides>
+    <binary>see_my_mac</binary>
+  </provides>
+</component>

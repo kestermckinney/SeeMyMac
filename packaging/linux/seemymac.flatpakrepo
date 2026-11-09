@@ -1,0 +1,13 @@
+[Flatpak Repo]
+Title=SeeMyMac
+Url=https://kestermckinney.gitlab.io/SeeMyMac/flatpak/
+Homepage=https://gitlab.com/kestermckinney/SeeMyMac
+Comment=Remote desktop client for Macs
+Description=Official Flatpak repository for SeeMyMac. Add this remote to install SeeMyMac and receive updates via `flatpak update`.
+Icon=https://kestermckinney.gitlab.io/SeeMyMac/flatpak/icon.png
+# Single-line, base64-encoded *public* half of the repo signing key.
+# Generate/export it with:
+#   gpg --export "SeeMyMac Flatpak Signing" | base64 --wrap=0
+# Paste the output as the value below (no line breaks). The matching private
+# key is held only as the FLATPAK_GPG_PRIVATE_KEY GitLab CI/CD variable.
+GPGKey=REPLACE_WITH_BASE64_PUBLIC_KEY

@@ -1,0 +1,52 @@
+app-id: io.gitlab.kestermckinney.SeeMyMac
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: see_my_mac
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/see-my-mac/cargo
+
+finish-args:
+  - --share=ipc
+  # Screen sharing connects to Macs over the network (VNC / Apple HP).
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  # GPUI renders through Vulkan/GL.
+  - --device=dri
+  # Plays the Mac's audio through PulseAudio / PipeWire's pulse server.
+  - --socket=pulseaudio
+  # Saved connection passwords live in the user's keyring.
+  - --talk-name=org.freedesktop.secrets
+  # Files are copied to and from the Mac. "Save files from the Mac in" is a
+  # user-typed path (default ~/Downloads) and dragged-in files come from
+  # arbitrary folders, so a narrower xdg-* scope would break the feature. This
+  # repository is self-hosted (no Flathub review), so the permission installs as-is.
+  - --filesystem=home
+
+modules:
+  - name: see-my-mac
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --verbose --bin see_my_mac
+      - install -Dm755 target/release/see_my_mac /app/bin/see_my_mac
+      - install -Dm644 packaging/linux/io.gitlab.kestermckinney.SeeMyMac.desktop /app/share/applications/io.gitlab.kestermckinney.SeeMyMac.desktop
+      - install -Dm644 packaging/linux/io.gitlab.kestermckinney.SeeMyMac.metainfo.xml /app/share/metainfo/io.gitlab.kestermckinney.SeeMyMac.metainfo.xml
+      - install -Dm644 assets/icons/seemac.svg /app/share/icons/hicolor/scalable/apps/io.gitlab.kestermckinney.SeeMyMac.svg
+      - install -Dm644 assets/icons/seemac.png /app/share/icons/hicolor/256x256/apps/io.gitlab.kestermckinney.SeeMyMac.png
+    sources:
+      # Pinned git source (immutable and fetched from the public remote). The
+      # release workflow overwrites `commit:` with the tag's own SHA, and
+      # build-flatpak.sh does the same for local runs (see SMM_REF there). The
+      # value here is only used with SMM_REF=pinned or when building this file directly.
+      - type: git
+        url: https://gitlab.com/kestermckinney/SeeMyMac.git
+        commit: e50c45cce5c345c56493a13624d8d1bcaa98e38e
+      # Cargo crates (generated from Cargo.lock; refresh with `build-flatpak.sh sources`).
+      - generated-sources.json

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SeeMyMac
+GenericName=Remote Desktop Client
+Comment=View and control your Mac from Linux, with clipboard, audio and file copy
+Exec=see_my_mac
+Icon=io.gitlab.kestermckinney.SeeMyMac
+Categories=Network;RemoteAccess;
+Keywords=VNC;Screen Sharing;Mac;Remote Desktop;
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.gitlab.kestermckinney.SeeMyMac

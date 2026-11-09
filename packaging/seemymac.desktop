@@ -5,4 +5,4 @@ Comment=Remote desktop client for Macs
 Exec=see_my_mac
 Icon=seemymac
 Categories=Network;RemoteAccess;
-StartupWMClass=seemymac
+StartupWMClass=io.gitlab.kestermckinney.SeeMyMac
