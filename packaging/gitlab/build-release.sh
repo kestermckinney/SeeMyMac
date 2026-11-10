@@ -14,11 +14,24 @@ trap 'gpgconf --kill gpg-agent || true; rm -rf "$GNUPGHOME"' EXIT
 printf '%s\n' allow-loopback-pinentry allow-preset-passphrase \
   'default-cache-ttl 21600' 'max-cache-ttl 21600' > "$GNUPGHOME/gpg-agent.conf"
 gpg --batch --import "$FLATPAK_GPG_PRIVATE_KEY"
+FLATPAK_GPG_KEY_ID="$(printf '%s' "$FLATPAK_GPG_KEY_ID" | tr -d '[:space:]')"
+echo "Imported secret keys:"
+gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print "  " $10 }'
+gpg --batch --list-secret-keys "$FLATPAK_GPG_KEY_ID" >/dev/null 2>&1 \
+  || { echo "FLATPAK_GPG_KEY_ID ($FLATPAK_GPG_KEY_ID) does not match an imported secret key"; exit 1; }
 if [ -n "${FLATPAK_GPG_PASSPHRASE:-}" ]; then
-  preset="$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase"
-  while read -r grip; do
-    printf '%s' "$FLATPAK_GPG_PASSPHRASE" | "$preset" --preset "$grip"
-  done < <(gpg --batch --with-colons --with-keygrip --list-secret-keys "$FLATPAK_GPG_KEY_ID" | awk -F: '$1 == "grp" { print $10 }')
+  preset=""
+  for c in "$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase" /usr/libexec/gpg-preset-passphrase /usr/lib/gnupg/gpg-preset-passphrase /usr/lib/gnupg2/gpg-preset-passphrase; do
+    [ -x "$c" ] && { preset="$c"; break; }
+  done
+  [ -n "$preset" ] || { echo "gpg-preset-passphrase not found in this image"; exit 1; }
+  gpg-connect-agent reloadagent /bye >/dev/null
+  grips="$(gpg --batch --with-colons --with-keygrip --list-secret-keys "$FLATPAK_GPG_KEY_ID" | awk -F: '$1 == "grp" { print $10 }')"
+  [ -n "$grips" ] || { echo "No keygrips found for $FLATPAK_GPG_KEY_ID"; exit 1; }
+  for grip in $grips; do
+    printf '%s' "$FLATPAK_GPG_PASSPHRASE" | "$preset" --preset "$grip" \
+      || { echo "gpg-preset-passphrase failed for keygrip $grip"; exit 1; }
+  done
 fi
 
 # Reject accidental key rotation: installed users trust the published public key.
