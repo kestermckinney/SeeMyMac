@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.gitlab.kestermckinney.SeeMyMac</id>
   <metadata_license>FSFAP</metadata_license>
-  <project_license>LicenseRef-proprietary</project_license>
+  <project_license>MIT</project_license>
 
   <name>SeeMyMac</name>
   <summary>Remote desktop client for Macs</summary>

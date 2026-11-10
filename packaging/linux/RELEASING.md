@@ -80,4 +80,3 @@ flatpak install seemymac io.gitlab.kestermckinney.SeeMyMac
   accepts drops from anywhere. The Flathub linter flags it; this repo is self-hosted.
 - Audio needs `--socket=pulseaudio`; saved passwords need
   `--talk-name=org.freedesktop.secrets`.
-- `metadata` project license is `LicenseRef-proprietary` as a placeholder; set the real one.
