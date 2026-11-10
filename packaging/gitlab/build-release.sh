@@ -61,6 +61,10 @@ flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flat
 flatpak install -y --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
 mkdir -p /var/lib/dbus
 dbus-uuidgen --ensure=/etc/machine-id
+# Build from this job's own checkout: the project may be private, and flatpak-builder
+# has no credentials to clone it from GitLab. SMM_REF below is the exact commit.
+git config --global --add safe.directory '*'
+export SMM_SOURCE_URL="file://$CI_PROJECT_DIR"
 export GPG_KEY_ID="$FLATPAK_GPG_KEY_ID" GPG_HOMEDIR="$GNUPGHOME"
 export APP_REPO_URL="$FLATPAK_REPO_URL" SMM_REF="$CI_COMMIT_SHA"
 # Export performs the build; do not compile everything twice.
