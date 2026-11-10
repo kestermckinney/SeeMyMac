@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -209,7 +210,11 @@ fn visit(path: &Path, level: u16, job: &mut Job) -> io::Result<()> {
     let size = if kind == KIND_FILE { meta.len() } else { 0 };
     let modified = meta.modified().unwrap_or(UNIX_EPOCH);
     // The owner must always be able to use the copy, whatever the source's mode.
+    #[cfg(unix)]
     let mode = (meta.permissions().mode() & 0o7777) as u16 | if kind == KIND_FOLDER { 0o700 } else { 0o600 };
+    // Windows ACLs have no Unix mode equivalent; give the Mac usable defaults.
+    #[cfg(not(unix))]
+    let mode = if kind == KIND_FOLDER { 0o755 } else { 0o644 };
     job.items.push(Item { path: path.to_owned(), name, level, kind, size, modified, accessed: meta.accessed().unwrap_or(modified), mode });
     if kind == KIND_FILE {
         job.files += 1;
@@ -466,6 +471,19 @@ fn safe_name(raw: &[u8]) -> io::Result<String> {
     if n.is_empty() || n == "." || n == ".." || n.contains(['/', '\0']) {
         return Err(bad("path separator or empty"));
     }
+    #[cfg(windows)]
+    if n.contains(['\\', ':', '<', '>', '"', '|', '?', '*']) || n.ends_with(['.', ' ']) || n.chars().any(|c| c.is_control()) {
+        return Err(bad("invalid Windows file name"));
+    }
+    #[cfg(windows)]
+    {
+        let stem = n.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+        let numbered_device = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|s| matches!(s, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"));
+        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered_device {
+            return Err(bad("reserved Windows device name"));
+        }
+    }
     Ok(n.to_owned())
 }
 
@@ -486,6 +504,7 @@ struct Open {
     file: std::fs::File,
     data_left: u64,
     rsrc_left: u64,
+    #[cfg(unix)]
     mode: u16,
     modified: SystemTime,
 }
@@ -584,6 +603,8 @@ impl Incoming {
         let data = u64_be(m, 0x38).ok_or_else(short)?;
         let level = u16_be(m, 0x6a).ok_or_else(short)? as usize;
         let mode = u16_be(m, 0x6c).ok_or_else(short)?;
+        #[cfg(not(unix))]
+        let _ = mode; // Received files inherit the destination's Windows ACLs.
         let nlen = u16_be(m, 0x72).ok_or_else(short)? as usize;
         let name = safe_name(m.get(0x76..0x76 + nlen).ok_or_else(short)?)?;
         let modified = match (u16_be(m, 0x48), u32_be(m, 0x4a)) {
@@ -602,12 +623,13 @@ impl Incoming {
         match kind {
             KIND_FOLDER => {
                 std::fs::create_dir(&path)?;
+                #[cfg(unix)]
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(u32::from(mode & 0o777 | 0o700)))?;
                 self.dirs.push(path.clone());
             }
             KIND_FILE => {
                 let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
-                let open = Open { file, data_left: data, rsrc_left: rsrc, mode, modified };
+                let open = Open { file, data_left: data, rsrc_left: rsrc, #[cfg(unix)] mode, modified };
                 if data == 0 && rsrc == 0 {
                     Self::finish(open);
                 } else {
@@ -639,8 +661,11 @@ impl Incoming {
 
     fn finish(o: Open) {
         let _ = o.file.set_modified(o.modified);
-        let mode = if o.mode == 0 { 0o644 } else { u32::from(o.mode & 0o777) | 0o600 };
-        let _ = o.file.set_permissions(std::fs::Permissions::from_mode(mode));
+        #[cfg(unix)]
+        {
+            let mode = if o.mode == 0 { 0o644 } else { u32::from(o.mode & 0o777) | 0o600 };
+            let _ = o.file.set_permissions(std::fs::Permissions::from_mode(mode));
+        }
     }
 }
 
@@ -907,6 +932,10 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "../x", "a\0b"] {
             assert!(safe_name(bad.as_bytes()).is_err(), "{bad:?}");
         }
+        #[cfg(windows)]
+        for bad in ["..\\x", "C:\\x", "C:x", "file:stream", "x.", "x ", "a?b", "NUL.txt", "con", "COM1", "LPT9.txt"] {
+            assert!(safe_name(bad.as_bytes()).is_err(), "{bad:?}");
+        }
         assert_eq!(safe_name("ok ✓.txt".as_bytes()).unwrap(), "ok ✓.txt");
     }
 
@@ -950,8 +979,11 @@ mod tests {
         assert_eq!(std::fs::read(top.join("small.txt")).unwrap(), b"hello");
         assert_eq!(std::fs::read(top.join("big.bin")).unwrap(), big);
         assert_eq!(std::fs::metadata(top.join("empty")).unwrap().len(), 0);
-        let mode = |n: &str| std::fs::metadata(top.join(n)).unwrap().permissions().mode() & 0o777;
-        assert_eq!((mode("small.txt"), mode("big.bin")), (0o640, 0o644));
+        #[cfg(unix)]
+        {
+            let mode = |n: &str| std::fs::metadata(top.join(n)).unwrap().permissions().mode() & 0o777;
+            assert_eq!((mode("small.txt"), mode("big.bin")), (0o640, 0o644));
+        }
         let m = std::fs::metadata(top.join("small.txt")).unwrap().modified().unwrap();
         assert_eq!(m, UNIX_EPOCH + Duration::from_secs(1_600_000_000));
         assert_eq!(inc.total, 100_005);

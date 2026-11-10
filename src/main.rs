@@ -27,6 +27,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
+                set_window_icon(window);
                 cx.new(|cx| {
                     let mut app = App::with_settings(store, settings, font, window, cx);
                     app.shortcuts = Some(see_my_mac::inhibit::Shortcuts::for_window(window));
@@ -41,3 +42,24 @@ fn main() {
         cx.activate(true);
     });
 }
+
+#[cfg(target_os = "windows")]
+fn set_window_icon(window: &gpui::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{Foundation::{HWND, LPARAM, WPARAM}, UI::WindowsAndMessaging::{CreateIconFromResourceEx, SendMessageW, IMAGE_FLAGS, WM_SETICON}};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else { return };
+    // PNG-compressed icon resources are supported by Windows. These handles
+    // stay alive until process exit so the window can use them throughout its life.
+    for (kind, size) in [(0, 16), (1, 32)] {
+        unsafe {
+            match CreateIconFromResourceEx(include_bytes!("../assets/icons/seemac.png"), true, 0x00030000, size, size, IMAGE_FLAGS(0)) {
+                Ok(icon) => { SendMessageW(HWND(handle.hwnd.get() as *mut _), WM_SETICON, Some(WPARAM(kind)), Some(LPARAM(icon.0 as isize))); }
+                Err(error) => log::warn!("could not load window icon: {error}"),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_window_icon(_: &gpui::Window) {}

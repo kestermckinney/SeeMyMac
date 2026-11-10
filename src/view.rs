@@ -96,8 +96,19 @@ impl App {
     pub(crate) fn text_field(&self, id: &'static str, field: Field, value: &str, placeholder: &str, masked: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.field == field;
         let shown: String = if masked { "•".repeat(value.chars().count()) } else { value.to_string() };
+        let cursor = self.cursor_for(field, value);
+        let display_cursor = if masked { value[..cursor].chars().count() * "•".len() } else { cursor };
+        let anchor = self.field_anchor.filter(|(f, _)| *f == field).map(|(_, i)| i.min(value.len())).unwrap_or(cursor);
+        let display_anchor = if masked { value[..anchor].chars().count() * "•".len() } else { anchor };
+        let placeholder = placeholder.to_string();
+        let actual = value.to_string();
+        let hit = Rc::new(std::cell::RefCell::new(None::<(Bounds<Pixels>, ShapedLine, Pixels)>));
+        let paint_hit = hit.clone();
+        let drag_hit = hit.clone();
+        let drag_actual = actual.clone();
         div()
             .id(id)
+            .debug_selector(move || id.to_string())
             .h(px(32.0))
             .w_full()
             .px(px(10.0))
@@ -109,16 +120,53 @@ impl App {
             .border_color(rgb(if focused { ACCENT_DARK } else { BORDER }))
             .cursor_text()
             .overflow_hidden()
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                let old_cursor = this.cursor_for(field, &actual);
                 this.field = field;
+                this.field_anchor = if ev.modifiers.shift { Some((field, this.field_anchor.filter(|(f, _)| *f == field).map_or(old_cursor, |(_, i)| i))) } else { None };
+                if let Some((bounds, line, offset)) = hit.borrow().as_ref() {
+                    let index = line.closest_index_for_x(ev.position.x - bounds.left() + *offset);
+                    let index = if masked {
+                        actual.char_indices().nth(index / "•".len()).map_or(actual.len(), |(i, _)| i)
+                    } else { index.min(actual.len()) };
+                    if !ev.modifiers.shift { this.field_anchor = Some((field, index)); }
+                    this.field_cursor = Some((field, index));
+                }
                 window.focus(&this.focus);
                 cx.notify();
             }))
-            .child(if shown.is_empty() && !focused {
-                div().text_color(rgb(MUTED)).child(placeholder.to_string())
-            } else {
-                div().flex().items_center().child(shown).child(div().w(px(1.0)).h(px(16.0)).ml(px(1.0)).bg(rgb(if focused { ACCENT_DARK } else { BG_CHROME })))
-            })
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                if ev.pressed_button != Some(MouseButton::Left) || this.field != field || this.field_anchor.is_none() { return; }
+                if let Some((bounds, line, offset)) = drag_hit.borrow().as_ref() {
+                    let index = line.closest_index_for_x(ev.position.x - bounds.left() + *offset);
+                    let index = if masked { drag_actual.char_indices().nth(index / "•".len()).map_or(drag_actual.len(), |(i, _)| i) } else { index.min(drag_actual.len()) };
+                    this.field_cursor = Some((field, index));
+                    cx.notify();
+                }
+            }))
+            .child(canvas(
+                move |bounds, window, _| {
+                    let style = window.text_style();
+                    let empty = shown.is_empty() && !focused;
+                    let text: SharedString = if empty { placeholder.clone().into() } else { shown.clone().into() };
+                    let run = TextRun { len: text.len(), font: style.font(), color: rgb(if empty { MUTED } else { TEXT }).into(), background_color: None, underline: None, strikethrough: None };
+                    let line = window.text_system().shape_line(text, style.font_size.to_pixels(window.rem_size()), &[run], None);
+                    let caret = line.x_for_index(display_cursor);
+                    let offset = if focused { (caret - bounds.size.width + px(2.0)).max(px(0.0)) } else { px(0.0) };
+                    *paint_hit.borrow_mut() = Some((bounds, line.clone(), offset));
+                    let anchor = line.x_for_index(display_anchor);
+                    (line, caret, offset, anchor)
+                },
+                move |bounds, (line, caret, offset, anchor), window, cx| {
+                    if focused && caret != anchor {
+                        window.paint_quad(fill(Bounds::new(point(bounds.left() + caret.min(anchor) - offset, bounds.top()), size((caret - anchor).abs(), px(20.0))), rgb(ACCENT)));
+                    }
+                    line.paint(point(bounds.left() - offset, bounds.top()), px(20.0), window, cx).ok();
+                    if focused {
+                        window.paint_quad(fill(Bounds::new(point(bounds.left() + caret - offset, bounds.top() + px(2.0)), size(px(1.0), px(16.0))), rgb(ACCENT_DARK)));
+                    }
+                },
+            ).w_full().h(px(20.0)))
     }
 
     /// The styled list shared by every dropdown and toolbar picker.
