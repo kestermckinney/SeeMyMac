@@ -13,7 +13,8 @@ chmod 700 "$GNUPGHOME"
 trap 'gpgconf --kill gpg-agent || true; rm -rf "$GNUPGHOME"' EXIT
 printf '%s\n' allow-loopback-pinentry allow-preset-passphrase \
   'default-cache-ttl 21600' 'max-cache-ttl 21600' > "$GNUPGHOME/gpg-agent.conf"
-gpg --batch --import "$FLATPAK_GPG_PRIVATE_KEY"
+gpg --batch --pinentry-mode loopback --passphrase "${FLATPAK_GPG_PASSPHRASE:-}" --import "$FLATPAK_GPG_PRIVATE_KEY" \
+  || { echo "gpg could not import FLATPAK_GPG_PRIVATE_KEY (wrong passphrase or damaged key file?)"; exit 1; }
 FLATPAK_GPG_KEY_ID="$(printf '%s' "$FLATPAK_GPG_KEY_ID" | tr -d '[:space:]')"
 echo "Imported secret keys:"
 gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print "  " $10 }'
