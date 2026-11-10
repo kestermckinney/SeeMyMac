@@ -1,4 +1,4 @@
-# SeeMyMac 0.1.2
+# SeeMyMac 0.1.3
 
 First Linux release, distributed as a Flatpak (signed repository on GitLab Pages).
 
