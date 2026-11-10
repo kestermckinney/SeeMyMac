@@ -10,4 +10,4 @@ Icon=https://kestermckinney.gitlab.io/SeeMyMac/flatpak/icon.png
 #   gpg --export "SeeMyMac Flatpak Signing" | base64 --wrap=0
 # Paste the output as the value below (no line breaks). The matching private
 # key is held only as the FLATPAK_GPG_PRIVATE_KEY GitLab CI/CD variable.
-GPGKey=REPLACE_WITH_BASE64_PUBLIC_KEY
+GPGKey=mDMEavKAJRYJKwYBBAHaRw8BAQdAFYIzD6lv/v2aHDOiLZS0AOFzxWnbhy9HqrlekKATH3+0IVNlZU15TWFjIEZsYXRwYWsgU2lnbmluZyAoR2l0TGFiKYiTBBMWCgA7FiEECOQVZu1moDmJJphZ7XsesufBfvYFAmrygCUCGwMFCwkIBwICIgIGFQoJCAsCBBYCAwECHgcCF4AACgkQ7XsesufBfvZBcAD/SHNCrhLjVCW6y5blsv3RGg9hbiDo3JewFevrJ8RBEzcA/2Gy0l5CR2+qoU1fRm3KbQmIS+TNdgVhchTGxoRceo4N
