@@ -13,7 +13,11 @@ chmod 700 "$GNUPGHOME"
 trap 'gpgconf --kill gpg-agent || true; rm -rf "$GNUPGHOME"' EXIT
 printf '%s\n' allow-loopback-pinentry allow-preset-passphrase \
   'default-cache-ttl 21600' 'max-cache-ttl 21600' > "$GNUPGHOME/gpg-agent.conf"
-gpg --batch --import "$FLATPAK_GPG_PRIVATE_KEY"
+# Some gpg builds exit non-zero after a successful import (warnings), so report the
+# status but judge success by whether the key can actually sign (checked below).
+import_status=0
+gpg --batch --pinentry-mode loopback --passphrase "${FLATPAK_GPG_PASSPHRASE:-}" --import "$FLATPAK_GPG_PRIVATE_KEY" || import_status=$?
+echo "gpg --import exit status: $import_status"
 FLATPAK_GPG_KEY_ID="$(printf '%s' "$FLATPAK_GPG_KEY_ID" | tr -d '[:space:]')"
 echo "Imported secret keys:"
 gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print "  " $10 }'
@@ -33,6 +37,12 @@ if [ -n "${FLATPAK_GPG_PASSPHRASE:-}" ]; then
       || { echo "gpg-preset-passphrase failed for keygrip $grip"; exit 1; }
   done
 fi
+
+# Prove the key unlocks and signs before spending an hour on the build.
+printf 'test' | gpg --batch --pinentry-mode loopback --passphrase "${FLATPAK_GPG_PASSPHRASE:-}" \
+  --local-user "$FLATPAK_GPG_KEY_ID" --detach-sign -o /dev/null \
+  || { echo "Cannot sign with $FLATPAK_GPG_KEY_ID: check FLATPAK_GPG_PASSPHRASE and the key file"; exit 1; }
+echo "Signing key check passed"
 
 # Reject accidental key rotation: installed users trust the published public key.
 python3 - <<'PY'

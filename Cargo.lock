@@ -5160,7 +5160,7 @@ dependencies = [
 
 [[package]]
 name = "see_my_mac"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "aes",
  "anyhow",
