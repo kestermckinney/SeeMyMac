@@ -156,6 +156,75 @@ impl Drop for Audio {
     }
 }
 
+/// Plays raw 48 kHz stereo signed 16-bit PCM through the same output as [`Audio`]
+/// (used by RDP, whose servers send PCM rather than AAC-ELD).
+pub struct PcmPlayer {
+    tx: SyncSender<Vec<u8>>,
+    thread: Option<JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl PcmPlayer {
+    /// The sample rate and channel count the output expects.
+    pub const RATE: u32 = RATE;
+    pub const CHANNELS: u16 = 2;
+
+    /// None when audio is switched off or unavailable (the reason is logged).
+    pub fn start() -> Option<Self> {
+        if std::env::var_os("SEEMYMAC_NO_AUDIO").is_some() {
+            return None;
+        }
+        let (tx, rx): (_, Receiver<Vec<u8>>) = sync_channel(64);
+        let (ready_tx, ready_rx) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("rdp-audio".into())
+            .spawn(move || {
+                let Some(mut sink) = Output::open() else {
+                    log::warn!("RDP audio disabled: no usable playback device/backend");
+                    return;
+                };
+                if ready_tx.send(()).is_err() {
+                    return;
+                }
+                while !s2.load(Ordering::Relaxed) {
+                    match rx.recv_timeout(Duration::from_millis(200)) {
+                        Ok(pcm) => {
+                            if !sink.write(&pcm, &s2) {
+                                log::warn!("RDP audio: playback stopped");
+                                break;
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                drop(sink);
+            })
+            .ok()?;
+        if ready_rx.recv().is_err() {
+            let _ = thread.join();
+            return None;
+        }
+        Some(Self { tx, thread: Some(thread), stop })
+    }
+
+    /// Queue PCM (interleaved stereo s16le at [`Self::RATE`]); a backlog drops it rather than add latency.
+    pub fn push(&self, pcm: Vec<u8>) {
+        let _ = self.tx.try_send(pcm);
+    }
+}
+
+impl Drop for PcmPlayer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

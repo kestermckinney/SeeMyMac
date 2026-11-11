@@ -431,21 +431,24 @@ fn session_shortcuts_switcher_and_fullscreen(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn failed_connection_shows_error_state_and_rdp_is_explained(cx: &mut TestAppContext) {
+fn failed_connection_shows_error_state_and_rdp_connects_like_the_others(cx: &mut TestAppContext) {
     // Port 1 on localhost: refused.
     let mut store = store_with(None);
     let mut rdp = Connection::blank("c9".into());
     rdp.name = "Win".into();
-    rdp.host = "10.0.0.5".into();
+    rdp.host = "127.0.0.1".into();
+    rdp.port = "1".into();
     rdp.proto = crate::model::Proto::Rdp;
     store.upsert(rdp);
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store, None, window, cx));
     open_and_login(cx, &view, "c2");
     tick_until(cx, &view, "failure", |a| matches!(a.sessions["c2"].status, Status::Failed(_)));
     draw(cx);
-    cx.update(|window, cx| view.update(cx, |a, cx| a.open_connection("c9", window, cx)));
+    // RDP asks for credentials and really tries to connect (there is an RDP client now).
+    open_and_login(cx, &view, "c9");
+    tick_until(cx, &view, "RDP failure", |a| matches!(a.sessions["c9"].status, Status::Failed(_)));
     view.read_with(cx, |a, _| match &a.sessions["c9"].status {
-        Status::Failed(m) => assert!(m.contains("RDP"), "{m}"),
+        Status::Failed(m) => assert!(!m.contains("not supported"), "RDP must not be reported as unsupported: {m}"),
         s => panic!("{s:?}"),
     });
     draw(cx);

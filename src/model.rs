@@ -30,9 +30,9 @@ impl Proto {
         }
     }
 
-    /// RDP has no client in this build; connecting reports that plainly.
+    /// Every protocol has a client (RDP is built on IronRDP, see `crate::rdp`).
     pub fn is_implemented(self) -> bool {
-        !matches!(self, Proto::Rdp)
+        true
     }
 }
 
@@ -228,6 +228,12 @@ pub struct Connection {
     /// plain VNC, so a VNC desktop of the same overall size is split with these.
     #[serde(default)]
     pub display_layout: Vec<[u32; 4]>,
+    /// RDP only: an RD Gateway (`host` or `host:port`) to reach the host through; empty = direct.
+    #[serde(default)]
+    pub gateway: String,
+    /// RDP only: run just this program (a path, or `||alias` for a published RemoteApp) instead of the desktop.
+    #[serde(default)]
+    pub remote_app: String,
 }
 
 impl Connection {
@@ -255,6 +261,8 @@ impl Connection {
             local: LocalResources::default(),
             last_used: 0,
             display_layout: vec![],
+            gateway: String::new(),
+            remote_app: String::new(),
         }
     }
 
