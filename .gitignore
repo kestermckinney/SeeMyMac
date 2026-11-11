@@ -11,3 +11,4 @@
 /packaging/linux/*.flatpak
 /public/
 /.release-secrets/
+/tools/rdp-test-server/target/
