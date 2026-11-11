@@ -2,6 +2,34 @@
 
 SeeMyMac is a cross-platform screen sharing application built with Rust and GPUI.
 
+## Install SeeMyMac
+
+### Windows
+
+Choose the installer for your PC's processor. In Windows, open **Settings → System → About** and check **System type**.
+
+- **ARM64:** use `SeeMyMac-<version>-arm64-setup.exe` on an ARM-based PC.
+- **x86:** use `SeeMyMac-<version>-x86-setup.exe` for the 32-bit Windows build; it can also run on compatible 64-bit Windows PCs.
+
+Run the installer, follow the prompts, and open **SeeMyMac** from the Start menu. The installers are unsigned. A Windows installer is not currently published by the release pipeline; to create one locally, follow the [Windows build instructions](#building) below. Debug installers have `-debug-setup.exe` in their names.
+
+### Linux
+
+Install [Flatpak](https://flatpak.org/setup/) for your distribution, then add the SeeMyMac repository and install the app:
+
+```bash
+flatpak remote-add --if-not-exists seemymac https://kestermckinney.gitlab.io/SeeMyMac/flatpak/seemymac.flatpakrepo
+flatpak install seemymac io.gitlab.kestermckinney.SeeMyMac
+```
+
+Open SeeMyMac from your applications menu, or run:
+
+```bash
+flatpak run io.gitlab.kestermckinney.SeeMyMac
+```
+
+Run `flatpak update` to install updates. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
+
 ## UI Driver Tool
 
 This project includes a Rust replacement for the original Python UI driver tool that was used for automated testing and control.
@@ -134,6 +162,19 @@ powershell -ExecutionPolicy Bypass -File .\tools\build-windows.ps1 -Test
 
 The script finds the Windows SDK's `fxc.exe` shader compiler for GPUI. Use
 `-Release` for an optimized build, or omit `-Test` to build without tests.
+
+To build Windows installers, install Inno Setup 6 and LLVM/Clang in addition to
+the Rust MSVC toolchain and Visual Studio C++ tools (including the ARM64 and x86
+target tools and Windows SDK). Then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build-installers.ps1
+```
+
+This produces separate ARM64 and 32-bit x86 release installers in
+`target\installers`. Use `-Architecture arm64` or `-Architecture x86` to build
+one, or add `-Debug` for debug builds. The installers are unsigned; signing is
+needed before distribution if trusted publisher verification is desired.
 
 Windows uses Credential Manager for saved passwords and Explorer for fetched
 files. Received files inherit Windows permissions; files sent to a Mac use
