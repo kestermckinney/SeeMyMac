@@ -5,6 +5,11 @@ pub mod geometry;
 pub mod hp;
 pub mod inhibit;
 pub mod model;
+pub mod rdp;
+pub mod rdp_gateway;
+pub mod rdp_rail;
+#[cfg(target_os = "linux")]
+pub mod rdp_scard;
 pub mod rfb;
 pub mod settings;
 pub mod state;

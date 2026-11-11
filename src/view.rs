@@ -945,6 +945,10 @@ impl App {
                     .child(row("Host name or IP address", self.text_field("f-host", Field::Host, &d.host, "mac.local or 192.168.1.20", false, cx).into_any_element()))
                     .child(row("Port", self.text_field("f-port", Field::Port, &d.port, &d.proto.default_port().to_string(), false, cx).into_any_element()))
                     .child(row("User name", self.text_field("f-user", Field::User, &d.user, "Optional for VNC", false, cx).into_any_element()))
+                    .when(d.proto == Proto::Rdp, |col| {
+                        col.child(row("RD Gateway (optional)", self.text_field("f-gateway", Field::Gateway, &d.gateway, "gateway.example.com or host:port", false, cx).into_any_element()))
+                            .child(row("RemoteApp program (optional)", self.text_field("f-remoteapp", Field::RemoteApp, &d.remote_app, "||notepad or C:\\Windows\\notepad.exe", false, cx).into_any_element()))
+                    })
                     .child(row("Credentials", self.cycle("f-cred", &CredentialMode::ALL, d.credentials, CredentialMode::label, |c, v| c.credentials = v, cx).into_any_element()))
                     .when(d.credentials == CredentialMode::Vault, |col| {
                         col.child(row("Password", self.text_field("f-pass", Field::Password, &form.password, if form.has_saved_password { "Saved. Type to replace it" } else { "Stored in the system keyring" }, true, cx).into_any_element()))

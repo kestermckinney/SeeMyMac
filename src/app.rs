@@ -4,6 +4,7 @@
 use crate::geometry;
 use crate::hp;
 use crate::model::{self, Connection, Proto, Scaling, Store};
+use crate::rdp;
 use crate::rfb::{self, Event, Input};
 use crate::settings::Settings;
 use crate::state::{AppState, Mon, View};
@@ -114,6 +115,8 @@ pub enum Field {
     Host,
     Port,
     User,
+    Gateway,
+    RemoteApp,
     Password,
     Manage,
     PwUser,
@@ -190,6 +193,8 @@ pub struct App {
     pub font: Option<SharedString>,
     /// Remote-screen area in window coordinates, updated on every render.
     pub area: Rc<Cell<Bounds<Pixels>>>,
+    /// This computer's monitors (x, y, width, height), for asking an RDP server for the same layout.
+    local_displays: Vec<rdp::MonitorRect>,
     pub held_keys: HashMap<String, u32>,
     pub held_mods: Modifiers,
     pub buttons: u8,
@@ -270,6 +275,7 @@ impl App {
             get_file: None,
             font,
             area: Rc::new(Cell::new(Bounds::default())),
+            local_displays: Vec::new(),
             held_keys: HashMap::new(),
             held_mods: Modifiers::default(),
             buttons: 0,
@@ -383,11 +389,26 @@ impl App {
         }
     }
 
+    /// Size asked of the remote machine: the connection's chosen resolution, or the window's.
+    fn requested_size(&self, conn: &model::Connection) -> (u32, u32) {
+        match conn.resolution {
+            model::Resolution::Fhd => (1920, 1080),
+            model::Resolution::Hd => (1280, 720),
+            _ => {
+                let a = self.area.get();
+                let (aw, ah) = (f32::from(a.size.width) as u32, f32::from(a.size.height) as u32);
+                if aw >= 640 && ah >= 360 { (aw & !1, ah & !1) } else { (1920, 1080) }
+            }
+        }
+    }
+
     fn start_connect(&mut self, id: &str) {
         let conn = match self.store.get(id) {
             Some(c) => c.clone(),
             None => return,
          };
+        let size = self.requested_size(&conn);
+        let displays = self.local_displays.clone();
         let s = match self.sessions.get_mut(id) {
             Some(s) => s,
             None => return,
@@ -395,7 +416,7 @@ impl App {
         s.handle = None;
         s.retry_at = None;
         if !conn.proto.is_implemented() {
-            s.status = Status::Failed(format!("{} connections are not supported in this build. Use Apple or VNC.", conn.proto.label()));
+            s.status = Status::Failed(format!("{} connections are not supported in this build.", conn.proto.label()));
             return;
         }
         s.status = if s.attempts > 0 { Status::Reconnecting } else { Status::Connecting };
@@ -410,15 +431,7 @@ impl App {
         let handle = match conn.proto {
             Proto::Apple => {
                 // Size advertised for the virtual display.
-                let (w, h) = match conn.resolution {
-                    model::Resolution::Fhd => (1920, 1080),
-                    model::Resolution::Hd => (1280, 720),
-                    _ => {
-                        let a = self.area.get();
-                        let (aw, ah) = (f32::from(a.size.width) as u32, f32::from(a.size.height) as u32);
-                        if aw >= 640 && ah >= 360 { (aw & !1, ah & !1) } else { (1920, 1080) }
-                    }
-                };
+                let (w, h) = size;
                 // A locked Mac's login window stays on its physical screen.
                 // Let the user unlock it before creating the virtual display.
                 s.virtual_pending = conn.virtual_display.then_some((w, h));
@@ -426,6 +439,26 @@ impl App {
                 s.virtual_offered = conn.virtual_display;
                 s.on_virtual = false;
                 hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: false, virtual_displays: conn.virtual_displays.clamp(1, 2) as u32, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
+            }
+            Proto::Rdp => {
+                let (w, h) = size;
+                s.virtual_size = (w, h); // the size asked of the server; later window changes are compared with it
+                let mut c = rdp::Config::new(conn.host.clone(), conn.port_number(), s.user.clone(), s.pass.clone());
+                (c.width, c.height) = (w, h);
+                c.clipboard = conn.local.clipboard;
+                c.audio = conn.local.audio;
+                c.printer = conn.local.printers;
+                c.color_depth = if conn.depth == model::ColorDepth::Bits16 { 16 } else { 32 };
+                // "Local drives" shares the Downloads folder (the home folder when there is none).
+                c.share_folder = conn.local.drives.then(|| dirs::download_dir().or_else(dirs::home_dir)).flatten();
+                if conn.span_monitors {
+                    c.monitors = displays;
+                }
+                c.download_dir = self.settings.download_path();
+                c.smartcard = conn.local.smart_cards;
+                c.gateway = Some(conn.gateway.trim().to_string()).filter(|g| !g.is_empty());
+                c.remote_app = Some(conn.remote_app.trim().to_string()).filter(|g| !g.is_empty());
+                rdp::connect(c)
             }
             _ => rfb::connect(rfb::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone() }),
         };
@@ -498,6 +531,7 @@ impl App {
 
     pub(crate) fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_clipboard(window, cx);
+        self.local_displays = cx.displays().iter().map(|d| { let b = d.bounds(); rdp::MonitorRect { x: f32::from(b.origin.x) as i32, y: f32::from(b.origin.y) as i32, w: f32::from(b.size.width) as u32, h: f32::from(b.size.height) as u32 } }).collect();
         let mut changed = false;
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
         let mut prompt: Option<(String, String)> = None;
@@ -601,6 +635,15 @@ impl App {
             let Some(h) = &s.handle else { continue };
             if s.status != Status::Connected {
                 continue;
+            }
+            // RDP "match window": the remote desktop follows the window's size.
+            if active && conn.as_ref().map_or(false, |c| c.proto == Proto::Rdp && c.resolution == model::Resolution::MatchWindow && !c.span_monitors) {
+                let a = self.area.get();
+                let (aw, ah) = (f32::from(a.size.width) as u32 & !1, f32::from(a.size.height) as u32 & !1);
+                if aw >= 640 && ah >= 360 && (aw, ah) != s.virtual_size {
+                    s.virtual_size = (aw, ah);
+                    h.send(Input::UseVirtualDisplay { width: aw, height: ah });
+                }
             }
             let due = active || s.last_build.elapsed() > Duration::from_secs(1);
             let layout = conn.as_ref().map_or(vec![], |c| c.display_layout.clone());
@@ -1129,6 +1172,8 @@ impl App {
             Field::Host => self.form.as_mut().map(|f| &mut f.draft.host),
             Field::Port => self.form.as_mut().map(|f| &mut f.draft.port),
             Field::User => self.form.as_mut().map(|f| &mut f.draft.user),
+            Field::Gateway => self.form.as_mut().map(|f| &mut f.draft.gateway),
+            Field::RemoteApp => self.form.as_mut().map(|f| &mut f.draft.remote_app),
             Field::Password => self.form.as_mut().map(|f| &mut f.password),
             Field::Manage => Some(&mut self.manage_query),
             Field::GetPath => self.get_file.as_mut().map(|g| &mut g.0),
@@ -1181,6 +1226,10 @@ impl App {
         match self.st.view {
             View::Dialog => {
                 let mut v = vec![Field::Name, Field::Host, Field::Port, Field::User];
+                if self.form.as_ref().map_or(false, |f| f.draft.proto == Proto::Rdp) {
+                    v.push(Field::Gateway);
+                    v.push(Field::RemoteApp);
+                }
                 if self.form.as_ref().map_or(false, |f| f.draft.credentials == model::CredentialMode::Vault) {
                     v.push(Field::Password);
                 }
@@ -1385,7 +1434,7 @@ impl App {
         if s.status != Status::Connected || paths.is_empty() {
             return;
         }
-        if !self.active_conn().map_or(false, |c| c.proto == Proto::Apple) {
+        if !self.active_conn().map_or(false, |c| matches!(c.proto, Proto::Apple | Proto::Rdp)) {
             return;
         }
         self.send(Input::SendFiles(paths));

@@ -69,6 +69,67 @@ wayland-protocols = "0.30"
 
 And implement the actual Wayland protocol communication in the tool's logic.
 
+## RDP (Remote Desktop Protocol)
+
+Connections set to **RDP** use a native client built on the [IronRDP](https://github.com/Devolutions/IronRDP)
+crates (`src/rdp.rs`; pure Rust, no FreeRDP). It connects with TLS and NLA (a user name and password),
+and supports:
+
+- the desktop picture (IronRDP's bitmap codecs), keyboard and mouse including the wheel;
+- clipboard text in both directions, and files: drop files or folders onto the window to copy them to
+  the server, and files copied on the server are saved to the download folder;
+- audio playback (PCM, through the same PulseAudio/PipeWire or WASAPI output as Apple HP);
+- the remote desktop following the window size (Display Control), and "Span all local monitors",
+  which asks the server for the same monitor layout as this computer;
+- on Linux and macOS, the connection's *Local drives* setting, which shares the Downloads folder (the home folder if
+  there is none), and *Printers*, which offers the default CUPS printer (it runs `lp`, so it does
+  not work inside the Flatpak sandbox).
+
+Checked against a real Windows 11 machine (2026-11-10): NLA sign-in, the picture, input, clipboard offer (accepted), live resize, drive and printer redirection (Windows replied `STATUS_SUCCESS` to both), the smart-card device (accepted; Windows calls the bridge, and `pcscd` answered `SCARD_W_SECURITY_VIOLATION` to a process that is not an active desktop login, so no card was read), multi-monitor (two requested monitors gave a 2560x800 desktop with a second wallpaper, and the monitor list is filled in from the request because Windows does not report it back), and the RemoteApp handshake (the server accepts RAIL mode and the launch is sent; Windows 11 client editions are not a real RemoteApp host, so the program itself was not seen to start). Windows only starts device redirection when the audio channel is declared too, so the client declares a silent one when audio is off but drives, printers or smart cards are on. Browsing the redirected drive works (a screenshot of the app's session shows `\\tsclient\D` in Explorer listing the local Downloads folder's files). The redirected printer appears in Windows once it is announced with a driver the server has (`Microsoft PS Class Driver` by default; `MS Publisher Imagesetter`, the library default, did not produce a printer on the Windows 11 test machine). A Windows test page printed through it arrived as a PostScript file in the download folder (no CUPS default printer was set up, so the client saved the job there) and rendered correctly. Printing through a real CUPS printer was not exercised.
+
+Implemented but only unit-tested, not yet run against real servers or hardware:
+
+- Kerberos (when the user name has a domain; direct KDC over TCP/UDP, no HTTPS KDC proxy) and following a
+  load balancer's server redirection.
+- Smart cards (Linux, `src/rdp_scard.rs`): the *Smart cards* setting offers the local PC/SC readers by loading
+  `libpcsclite` at run time; waits for card insertion run off the session thread.
+- RD Gateway (`src/rdp_gateway.rs`): the *RD Gateway* field on an RDP connection tunnels it through the
+  gateway, signing in with the same user and password. A local forwarder bridges IronRDP's async gateway
+  client to the blocking RDP client.
+
+- RemoteApp (`src/rdp_rail.rs`): the *RemoteApp program* field runs just that program (a path, or `||alias` for a
+  published RemoteApp). The RAIL conversation (handshake, client status, launch) is implemented; the program's
+  windows appear in the session picture rather than as separate windows. Only unit-tested.
+
+Not supported: separate native windows per RemoteApp window, and smart cards on macOS/Windows.
+
+The server's TLS certificate is accepted without a prompt, as most RDP
+clients do for the self-signed certificates Windows presents by default; NLA still binds the login
+to that certificate's key.
+
+### Testing RDP
+
+`tools/rdp-test-server` is a small RDP server (its own Cargo package: the server crate pins older
+IronRDP pre-releases than the client uses, so they cannot share one dependency graph) and
+`src/bin/rdp_probe.rs` drives the client against it:
+
+```bash
+cargo build --manifest-path tools/rdp-test-server/Cargo.toml
+tools/rdp-test-server/target/debug/rdp-test-server 3390 tester secret &
+SEEMYMAC_USER=tester SEEMYMAC_PASS=secret cargo run --bin rdp_probe -- 127.0.0.1:3390 8
+```
+
+Against a real host, leave the password out and the probe asks for it without echoing it
+(`SEEMYMAC_USER=me cargo run --bin rdp_probe -- host`), or use a connection saved in the app
+(`cargo run --bin rdp_probe -- @CONNECTION_ID`). `SEEMYMAC_PROBE_SHARE=DIR`, `SEEMYMAC_PROBE_PRINTER=1`,
+`SEEMYMAC_PROBE_SMARTCARD=1` and `SEEMYMAC_PROBE_MONITORS=WxH,WxH` switch on the other features.
+
+Against a real host, `SEEMYMAC_PROBE_NO_INPUT=1` only watches (use it on a live session: the default probe clicks, types and resizes) and `SEEMYMAC_PROBE_SNAPSHOT=file.png` saves a picture of the remote desktop.
+
+The probe checks the connection and sign-in, the first picture, input (the server prints each event),
+clipboard both ways, file copy both ways (with a checksum), audio, and a desktop resize. Drive and printer redirection and multi-monitor
+layouts are not covered by this server; test those against a Windows host.
+
 ## Apple High Performance Protocol
 
 SeeMyMac speaks both standard VNC and Apple's High Performance (HP) Screen Sharing.

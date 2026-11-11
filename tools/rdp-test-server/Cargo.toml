@@ -1,0 +1,21 @@
+# A throwaway RDP server for exercising SeeMyMac's RDP client on one machine.
+# It is its own package because ironrdp-server pins older pre-release crates than
+# the client uses, so the two cannot share one dependency graph.
+[package]
+name = "rdp-test-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ironrdp-server = { version = "0.13", features = ["helper"] }
+ironrdp-core = "0.2"
+ironrdp-cliprdr = "0.7"
+ironrdp-rdpsnd = "0.9"
+ironrdp-displaycontrol = "0.8"
+tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }
+async-trait = "0.1"
+rcgen = "0.14"
+anyhow = "1"
+
+[workspace]
