@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.gitlab.kestermckinney.SeeMyMac</id>
   <metadata_license>FSFAP</metadata_license>
-  <project_license>LicenseRef-proprietary</project_license>
+  <project_license>MIT</project_license>
 
   <name>SeeMyMac</name>
   <summary>Remote desktop client for Macs</summary>
@@ -31,6 +31,7 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.4" date="2026-11-09"/>
     <release version="0.1.0" date="2026-11-08"/>
   </releases>
 

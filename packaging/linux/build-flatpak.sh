@@ -58,6 +58,9 @@ fi
 #          committed manifest is never edited.
 SMM_REF="${SMM_REF:-latest}"
 SMM_GIT_URL="https://gitlab.com/kestermckinney/SeeMyMac.git"
+# SMM_SOURCE_URL  Clone the app source from here instead of GitLab (CI points it at
+#                 its own checkout, so a private project needs no credentials).
+SMM_SOURCE_URL="${SMM_SOURCE_URL:-}"
 # Must sit next to the real manifest so generated-sources.json resolves.
 RESOLVED_MANIFEST="$SCRIPT_DIR/.${APP_ID}.resolved.yml"
 
@@ -86,8 +89,8 @@ resolve_manifest() {
     sha="$(remote_sha "$SMM_GIT_URL" "$ref")"
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Error: could not resolve SeeMyMac ref '$ref'"; exit 1; }
 
-    awk -v sha="$sha" '
-        /url: .*kestermckinney\/SeeMyMac\.git/ { insm = 1 }
+    awk -v sha="$sha" -v src="$SMM_SOURCE_URL" '
+        /url: .*kestermckinney\/SeeMyMac\.git/ { insm = 1; if (src != "") sub(/url:.*/, "url: " src) }
         insm && /^[[:space:]]*commit:/ { sub(/commit:.*/, "commit: " sha); insm = 0 }
         { print }
     ' "$MANIFEST" > "$RESOLVED_MANIFEST"
