@@ -947,8 +947,9 @@ fn tcp_reader(ctx: Arc<Ctx>, mut s: TcpStream, mut rx: Enc1103Rx, leftover: Vec<
 fn tick(ctx: &Ctx, hb: &mut SrtpTx, n: u64) {
     let _ = ctx.media.ctrl.send_to(&hb.encrypt(&HEARTBEAT, 101), ctx.media.host);
     tick_stream(ctx, n);
-    // Keeps the control-channel pseudo-encoding sender armed without pulling video.
-    let _ = ctx.control.send(&fbu_request(true, 1, 1));
+    // Keep the whole desktop subscribed to changes, including after a resize.
+    // A 1x1 request only subscribes to changes at the top-left pixel.
+    let _ = ctx.control.send(&fbu_request(true, u16::MAX, u16::MAX));
 }
 
 /// Per-stream upkeep: receiver reports, keyframe retries and stall recovery.

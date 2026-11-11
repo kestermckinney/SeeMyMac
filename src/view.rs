@@ -417,7 +417,7 @@ impl App {
             .bg(rgb(BG_CHROME))
             .border_b_1()
             .border_color(rgb(DIVIDER))
-            .child(tool_btn("btn-connections", "").child(svg().path("ui/menu.svg").size(px(18.0)).text_color(rgb(TEXT))).on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))))
+            .child(tool_btn("btn-connections", "").child(svg().path("ui/menu.svg").size(px(15.3)).text_color(rgb(TEXT))).on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))))
             .child(tabs)
             .child(tool_btn("btn-new", "+").on_click(cx.listener(|this, _, window, cx| this.new_connection_dialog(window, cx))))
             .child(div().flex_1())
@@ -520,7 +520,7 @@ impl App {
                 .child(div().text_size(px(12.0)).child(if self.active_session().map_or(false, |s| s.big_screen) {
                     "This Mac's 5K screen is slow to show here, so input lags. Log in if it is locked, then switch."
                 } else {
-                    "Showing the Mac's own screen. Log in here if it is locked, then switch."
+                    "Showing the Mac's own screen. Virtual displays may start with an empty desktop."
                 }))
                 .child(primary_btn("banner-virtual", "Use virtual display").on_click(cx.listener(|this, _, _, cx| this.use_virtual_display(cx))))
                 .child(secondary_btn("banner-stay", "Stay on this screen").on_click(cx.listener(|this, _, _, cx| {
@@ -749,6 +749,7 @@ impl App {
             let (oid, eid) = (c.id.clone(), c.id.clone());
             row_base(ElementId::from((prefix, idx)))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_connection(&oid, window, cx)))
+                .child(svg().path("ui/connections.svg").size(px(18.0)).text_color(rgb(TEXT)))
                 .child(div().flex_1().min_w_0().truncate().child(c.display_name().to_string()))
                 .when(open, |d| d.child(div().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).bg(rgb(SELECTED)).border_1().border_color(rgb(BORDER)).text_size(px(11.0)).child("Open")))
                 .child(
@@ -780,7 +781,7 @@ impl App {
         }
 
         let action = |id: &'static str, text: &'static str, hint: &'static str| {
-            row_base(ElementId::from(id)).child(div().flex_1().child(text)).child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(hint))
+            row_base(ElementId::from(id)).child(svg().path(match id { "act-new" => "ui/new.svg", "act-manage" => "ui/connections.svg", "act-getfile" => "ui/download.svg", _ => "ui/settings.svg" }).size(px(18.0)).text_color(rgb(TEXT))).child(div().flex_1().child(text)).child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(hint))
         };
 
         div()
@@ -806,6 +807,12 @@ impl App {
             .child(action("act-manage", "Manage all connections…", "Ctrl+M").on_click(cx.listener(|this, _, window, cx| this.open_manage(window, cx))))
             .child(action("act-getfile", "Get file from Mac…", "").on_click(cx.listener(|this, _, window, cx| this.open_get_file(window, cx))))
             .child(action("act-settings", "Settings", "Ctrl+,").on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))))
+            .child(div().h(px(1.0)).bg(rgb(DIVIDER)))
+            .child(row_base(ElementId::from("act-exit"))
+                .debug_selector(|| "act-exit".into())
+                .child(svg().path("ui/exit.svg").size(px(18.0)).text_color(rgb(TEXT)))
+                .child("Exit")
+                .on_click(cx.listener(|this, _, _, cx| this.quit(cx))))
     }
 
     fn switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -954,7 +961,8 @@ impl App {
                 .child(row("Start in", self.cycle("d-start", &StartIn::ALL, d.start_in, StartIn::label, |c, v| c.start_in = v, cx).into_any_element()))
                 .child(row("When the remote PC has more monitors than this PC", self.cycle("d-multi", &MultiMonitor::ALL, d.multi_monitor, MultiMonitor::label, |c, v| c.multi_monitor = v, cx).into_any_element()))
                 .when(d.proto == Proto::Apple, |col| {
-                    col.child(self.check("d-virtual", "Use virtual display (blanks the Mac's own screens)", d.virtual_display, |c, v| c.virtual_display = v, cx))
+                    col.child(self.check("d-virtual", "Offer a virtual display after connecting", d.virtual_display, |c, v| c.virtual_display = v, cx))
+                        .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child("Keep this off to view the Mac's existing windows. A virtual display may open an empty desktop."))
                         .when(d.virtual_display, |col| {
                             col.child(row("Virtual displays", self.cycle("d-virtual-count", &[1u8, 2], d.virtual_displays.clamp(1, 2), |n| if n == 2 { "2 (shown as monitors 1 and 2)" } else { "1" }, |c, v| c.virtual_displays = v, cx).into_any_element()))
                         })
@@ -1245,6 +1253,11 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(match path {
             "ui/menu.svg" => Some(include_bytes!("../assets/ui/menu.svg").as_slice().into()),
+            "ui/new.svg" => Some(include_bytes!("../assets/ui/new.svg").as_slice().into()),
+            "ui/connections.svg" => Some(include_bytes!("../assets/ui/connections.svg").as_slice().into()),
+            "ui/download.svg" => Some(include_bytes!("../assets/ui/download.svg").as_slice().into()),
+            "ui/settings.svg" => Some(include_bytes!("../assets/ui/settings.svg").as_slice().into()),
+            "ui/exit.svg" => Some(include_bytes!("../assets/ui/exit.svg").as_slice().into()),
             "ui/keys.svg" => Some(include_bytes!("../assets/ui/keys.svg").as_slice().into()),
             "ui/scale.svg" => Some(include_bytes!("../assets/ui/scale.svg").as_slice().into()),
             "ui/switch.svg" => Some(include_bytes!("../assets/ui/switch.svg").as_slice().into()),
