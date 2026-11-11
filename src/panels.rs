@@ -217,7 +217,7 @@ impl App {
                     .child(form_row("Start in", self.settings_cycle("s-start", &StartIn::ALL, st.default_start_in, |p| p.label().to_string(), |s, v| s.default_start_in = v, cx)))
                     .child(form_row("Scaling", self.settings_cycle("s-scale", &Scaling::ALL, st.default_scaling, |p| p.label().to_string(), |s, v| s.default_scaling = v, cx)))
                     .child(self.settings_check("s-virtual", "Use a virtual display for Apple HP", st.default_virtual_display, |s, v| s.default_virtual_display = v, cx))
-                    .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Sessions start on the Mac's own screen so a locked Mac can be logged in to; then Use virtual display (Ctrl+Alt+V) moves the session and blanks the Mac's screens."))
+                    .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Sessions start on the Mac's own screen. Keep that screen to view existing windows. Use virtual display (Ctrl+Alt+V) switches to a separate display, which may start with an empty desktop."))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Files"))
                     .child(form_row("Save files from the Mac in", self.text_field("s-download", Field::Download, &st.download_dir, "~/Downloads", false, cx).into_any_element()))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Connections"))

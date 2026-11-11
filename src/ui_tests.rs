@@ -171,6 +171,22 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn menu_exit_closes_connected_sessions_and_quits(cx: &mut TestAppContext) {
+    let (port, _rx) = fake_mac(64, 36, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected session", |a| a.sessions["c1"].status == Status::Connected);
+    cx.update(|window, cx| view.update(cx, |a, cx| a.toggle_menu(window, cx)));
+    draw(cx);
+    let bounds = cx.debug_bounds("act-exit").expect("Exit is visible in the menu");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    view.read_with(cx, |a, _| {
+        assert!(a.quit_requested);
+        assert!(a.sessions.values().all(|s| s.handle.is_none()), "Exit closes every connection");
+    });
+}
+
+#[gpui::test]
 fn dialog_typing_validation_and_save(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));
     cx.simulate_keystrokes("ctrl-n");
@@ -590,7 +606,9 @@ fn apple_hp_two_virtual_displays_are_live_monitors(cx: &mut TestAppContext) {
     tick_until(cx, &view, "HP picture", |a| a.sessions["hp2"].status == Status::Connected && !a.sessions["hp2"].tiles.is_empty());
     std::env::remove_var("SEEMYMAC_DEMO");
     view.update(cx, |a, _| a.st.pinned = true);
-    // Connected straight onto two virtual displays: two live monitors.
+    assert_eq!(view.read_with(cx, |a, _| a.sessions["hp2"].monitors), 1);
+    cx.simulate_keystrokes("ctrl-alt-v");
+    // After unlocking, switching creates two live monitors.
     tick_until(cx, &view, "two monitors", |a| a.sessions["hp2"].monitors == 2);
     let green = |a: &App| a.sessions["hp2"].tiles.first().and_then(|t| t.image.as_bytes(0).map(|b| b[1] == 255)).unwrap_or(false);
     cx.simulate_keystrokes("ctrl-alt-pagedown");
@@ -629,10 +647,9 @@ fn apple_hp_one_virtual_display_is_one_monitor(cx: &mut TestAppContext) {
     cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("hp3", window, cx)));
 }
 
-/// A virtual-display Apple HP session connects straight onto the virtual display:
-/// no banner and nothing pending.
+/// Keep the login window visible until the user chooses the virtual display.
 #[gpui::test]
-fn apple_hp_virtual_display_is_used_from_the_start(cx: &mut TestAppContext) {
+fn apple_hp_virtual_display_waits_for_user_after_login(cx: &mut TestAppContext) {
     std::env::set_var("SEEMYMAC_DEMO", "1");
     let mut store = Store::load(None);
     let mut c = Connection::blank("hpv".into());
@@ -644,9 +661,11 @@ fn apple_hp_virtual_display_is_used_from_the_start(cx: &mut TestAppContext) {
     open_and_login(cx, &view, "hpv");
     tick_until(cx, &view, "HP frame", |a| a.sessions["hpv"].status == Status::Connected && !a.sessions["hpv"].tiles.is_empty());
     std::env::remove_var("SEEMYMAC_DEMO");
-    assert!(view.read_with(cx, |a, _| a.sessions["hpv"].virtual_pending.is_none() && a.sessions["hpv"].on_virtual));
+    assert!(view.read_with(cx, |a, _| a.sessions["hpv"].virtual_pending.is_some() && !a.sessions["hpv"].on_virtual));
     draw(cx);
-    assert!(cx.debug_bounds("virtual-banner").is_none(), "no banner: already on the virtual display");
+    assert!(cx.debug_bounds("virtual-banner").is_some(), "offer switching after the Mac is unlocked");
+    cx.simulate_keystrokes("ctrl-alt-v");
+    assert!(view.read_with(cx, |a, _| a.sessions["hpv"].virtual_pending.is_none() && a.sessions["hpv"].on_virtual));
     // A VNC session never offers it.
     let (port, _rx) = fake_mac(32, 18, false);
     view.update(cx, |a, _| {

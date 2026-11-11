@@ -432,12 +432,13 @@ impl App {
             Proto::Apple => {
                 // Size advertised for the virtual display.
                 let (w, h) = size;
-                // When a virtual display is chosen, connect straight onto it.
-                s.virtual_pending = None;
+                // A locked Mac's login window stays on its physical screen.
+                // Let the user unlock it before creating the virtual display.
+                s.virtual_pending = conn.virtual_display.then_some((w, h));
                 s.virtual_size = (w, h);
                 s.virtual_offered = conn.virtual_display;
-                s.on_virtual = conn.virtual_display;
-                hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: conn.virtual_display, virtual_displays: conn.virtual_displays.clamp(1, 2) as u32, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
+                s.on_virtual = false;
+                hp::connect(hp::Config { host: conn.host.clone(), port: conn.port_number(), username: s.user.clone(), password: s.pass.clone(), width: w, height: h, virtual_display: false, virtual_displays: conn.virtual_displays.clamp(1, 2) as u32, demo: std::env::var_os("SEEMYMAC_DEMO").is_some() })
             }
             Proto::Rdp => {
                 let (w, h) = size;
@@ -1117,7 +1118,7 @@ impl App {
         }
     }
 
-    /// The title bar's close button: end every session, then quit.
+    /// End every session, then quit (title bar close and menu Exit).
     pub fn quit(&mut self, cx: &mut Context<Self>) {
         self.quit_requested = true;
         for s in self.sessions.values_mut() {
