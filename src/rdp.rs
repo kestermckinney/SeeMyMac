@@ -22,6 +22,8 @@ use ironrdp_core::impl_as_any;
 use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp_dvc::DrdynvcClient;
+use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_pdu::rdp::server_redirection::{ServerRedirectionFlags, ServerRedirectionPdu};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{Database, MouseButton, MousePosition, Operation, Scancode, WheelRotations};
 use ironrdp_pdu::gcc::KeyboardType;
@@ -214,7 +216,8 @@ fn connector_config(cfg: &Config) -> connector::Config {
         work_dir: String::new(),
         remote_application_mode: cfg.remote_app.is_some(),
         rail_support_level: if cfg.remote_app.is_some() { ironrdp_pdu::rdp::capability_sets::RailSupportLevel::SUPPORTED } else { ironrdp_pdu::rdp::capability_sets::RailSupportLevel::empty() },
-        support_dyn_vc_gfx_protocol: false,
+        // GNOME Remote Desktop refuses clients without the graphics pipeline (RDPGFX).
+        support_dyn_vc_gfx_protocol: true,
         platform: MajorPlatformType::UNIX,
         hardware_id: None,
         request_data: None,
@@ -352,6 +355,9 @@ fn dial(
     clip_state: &Arc<Mutex<ClipState>>,
 ) -> Result<(ConnectionOutcome, Framed<Tls>)> {
     stage(ev, &format!("Connecting to {host}…"));
+    // Open the audio device alongside the connection: it can take seconds (WASAPI), and some
+    // servers (GNOME Remote Desktop) hang up on a client that stays silent for about two.
+    let audio = cfg.audio.then(open_audio);
     let addr = match &cfg.gateway {
         // Through an RD Gateway: connect to the local end of its tunnel; the real host name is still
         // what TLS and sign-in use.
@@ -377,15 +383,20 @@ fn dial(
     }
     let kerberos = cc.domain.as_ref().filter(|d| !d.is_empty()).map(|_| KerberosConfig { kdc_proxy_url: None, hostname: host.to_string() });
     let mut conn = ClientConnector::new(cc, client_addr)
-        .with_static_channel(DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))));
+        .with_static_channel(
+            DrdynvcClient::new()
+                .with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new())))
+                // No H.264 decoder: the server then picks RemoteFX, ClearCodec or planar.
+                .with_dynamic_channel(GraphicsPipelineClient::new(Box::new(Gfx), None)),
+        );
     if let Some(p) = redirect {
         conn = conn.with_cluster_data(ironrdp_pdu::gcc::ClientClusterData {
             flags: ironrdp_pdu::gcc::RedirectionFlags::REDIRECTION_SUPPORTED | ironrdp_pdu::gcc::RedirectionFlags::REDIRECTED_SESSION_FIELD_VALID,
             redirection_version: ironrdp_pdu::gcc::RedirectionVersion::V6,
             redirected_session_id: p.session_id,
         });
-        if let Some(lb) = &p.load_balance_info {
-            conn = conn.with_load_balance_info(String::from_utf8_lossy(lb).into_owned());
+        if let Some(lb) = routing_token(p) {
+            conn = conn.with_load_balance_info(lb);
         }
         if let Some(pw) = &p.password {
             conn = conn.with_redirection_password_cookie(pw.clone());
@@ -397,17 +408,10 @@ fn dial(
     // Windows only starts device redirection (drives, printers) when the audio channel is declared too,
     // so when redirection is wanted but audio is not (or cannot play), a silent channel stands in.
     let wants_devices = cfg.share_folder.is_some() || cfg.printer || cfg.smartcard;
-    let player = if cfg.audio { PcmPlayer::start() } else { None };
-    match player {
-        Some(p) => conn = conn.with_static_channel(Rdpsnd::new(Box::new(Sound::new(p)))),
-        None => {
-            if cfg.audio {
-                log::warn!("RDP audio unavailable; the session will be silent");
-            }
-            if wants_devices {
-                conn = conn.with_static_channel(Rdpsnd::new(Box::new(ironrdp_rdpsnd::client::NoopRdpsndBackend)));
-            }
-        }
+    match audio {
+        Some(opening) => conn = conn.with_static_channel(Rdpsnd::new(Box::new(Sound::new(opening)))),
+        None if wants_devices => conn = conn.with_static_channel(Rdpsnd::new(Box::new(ironrdp_rdpsnd::client::NoopRdpsndBackend))),
+        None => {}
     }
     if cfg.clipboard {
         let backend = Clip { tx: clip_tx.clone(), events: ev.clone(), state: clip_state.clone(), tmp: std::env::temp_dir().to_string_lossy().into_owned() };
@@ -417,12 +421,24 @@ fn dial(
         conn = conn.with_static_channel(r);
     }
 
+    // A redirect carrying an encrypted one-time password (GNOME Remote Desktop hands a login
+    // over to the user's session this way) is answered with RDSTLS instead of CredSSP.
+    let rdstls = redirect.filter(|p| p.flags.contains(ServerRedirectionFlags::PASSWORD_IS_PK_ENCRYPTED) && p.password.is_some());
     let mut framed = Framed::new(tcp);
     stage(ev, "Negotiating…");
-    let should_upgrade = ironrdp_blocking::connect_begin(&mut framed, &mut conn).context("RDP negotiation")?;
+    let should_upgrade = match rdstls {
+        Some(p) => {
+            rdstls_negotiate(&mut framed, &mut conn, p)?;
+            ironrdp_blocking::skip_connect_begin(&mut conn)
+        }
+        None => ironrdp_blocking::connect_begin(&mut framed, &mut conn).context("RDP negotiation")?,
+    };
     let tcp = framed.into_inner_no_leftover();
     stage(ev, "Securing the connection…");
-    let (tls, server_key) = tls_upgrade(tcp, host)?;
+    let (mut tls, server_key) = tls_upgrade(tcp, host)?;
+    if let Some(p) = rdstls {
+        rdstls_authenticate(&mut tls, p)?;
+    }
     let upgraded = ironrdp_blocking::mark_as_upgraded(should_upgrade, &mut conn);
     let mut framed = Framed::new(tls);
     stage(ev, "Signing in…");
@@ -438,227 +454,411 @@ fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, i
     let mut target = cfg.host.clone();
     let mut port = cfg.port;
     let mut redirect: Option<Box<ironrdp_pdu::rdp::server_redirection::ServerRedirectionPdu>> = None;
-    let (res, mut framed) = 'dial: {
-        for _ in 0..4 {
-            let (outcome, framed) = dial(cfg, &target, port, redirect.as_deref(), ev, &clip_tx, &clip_state)?;
-            match outcome {
-                ConnectionOutcome::Connected(r) => break 'dial (r, framed),
-                ConnectionOutcome::Redirected(p) => {
-                    let next = p.target_net_address.clone().or_else(|| p.target_fqdn.clone()).or_else(|| p.target_net_addresses.as_ref().and_then(|a| a.first().cloned()));
-                    log::info!("{}: the server redirected the session to {next:?}", cfg.host);
-                    if let Some(n) = next {
-                        target = n;
-                        port = cfg.port;
-                    }
-                    redirect = Some(p);
-                    stage(ev, "Redirected to another server…");
-                }
-            }
-        }
-        bail!("the server kept redirecting the session");
-    };
-
-    let (mut w, mut h) = (u32::from(res.desktop_size.width), u32::from(res.desktop_size.height));
-    let mut image = DecodedImage::new(PixelFormat::BgrA32, res.desktop_size.width, res.desktop_size.height);
-    {
-        let mut f = fb.lock().unwrap();
-        f.resize(w, h);
-        f.bgra = vec![0; (w * h * 4) as usize];
-        f.name = cfg.host.clone();
-        f.screens = requested_screens(&cfg.monitors).into_iter().filter(|s| s.x + s.w <= w && s.y + s.h <= h).collect();
-        f.version += 1;
-    }
-    let _ = ev.send(Event::Connected { width: w, height: h, name: cfg.host.clone() });
-    let activation = res.activation_factory.clone();
-    let mut stage_ = ActiveStageBuilder {
-        static_channels: res.static_channels,
-        user_channel_id: res.user_channel_id,
-        io_channel_id: res.io_channel_id,
-        message_channel_id: res.message_channel_id,
-        share_id: res.share_id,
-        compression_type: res.compression_type,
-        enable_server_pointer: res.enable_server_pointer,
-        pointer_software_rendering: res.pointer_software_rendering,
-    }
-    .build();
-
-    // Short reads, so input and clipboard work is never starved by a quiet server.
-    framed.get_inner_mut().0.sock.set_read_timeout(Some(POLL))?;
-
-    let mut keys = Keys::default();
-    let mut mouse = Mouse::default();
-    let mut dirty: Option<Rect> = None;
-    let mut last_publish = Instant::now();
-    let mut want_size: Option<(u32, u32)> = None;
-    let mut last_resize = Instant::now();
-    let mut last_housekeeping = Instant::now();
-    let mut channel_traffic: HashMap<u16, u32> = HashMap::new();
-
-    loop {
-        if stopping.load(Ordering::SeqCst) {
-            log::debug!("{}: PDUs received per channel id: {:?}", cfg.host, channel_traffic);
-            for o in stage_.graceful_shutdown().unwrap_or_default() {
-                if let ActiveStageOutput::ResponseFrame(f) = o {
-                    let _ = framed.write_all(&f);
-                }
-            }
-            return Ok(());
-        }
-
-        // Input.
-        let mut frames: Vec<Vec<u8>> = Vec::new();
-        while let Ok(i) = inputs.try_recv() {
-            match i {
-                Input::Pointer { x, y, buttons } => {
-                    let evs = mouse.apply(x, y, buttons);
-                    send_input(&mut stage_, &mut image, &mut frames, &evs)?;
-                }
-                Input::Key { keysym, down } => {
-                    let evs = keys.key(keysym, down);
-                    send_input(&mut stage_, &mut image, &mut frames, &evs)?;
-                }
-                Input::Clipboard(text) => {
-                    clip_state.lock().unwrap().local = Some(text);
-                    let _ = clip_tx.send(ClipboardMessage::SendInitiateCopy(vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]));
-                }
-                Input::SendFiles(paths) => {
-                    let (descs, local) = describe_files(&paths);
-                    if !descs.is_empty() {
-                        let mut st = clip_state.lock().unwrap();
-                        st.offered_total = descs.iter().map(|d| d.file_size.unwrap_or(0)).sum();
-                        st.sent = 0;
-                        st.offered = local;
-                        drop(st);
-                        let _ = clip_tx.send(ClipboardMessage::SendInitiateFileCopy(descs));
-                    }
-                }
-                Input::UseVirtualDisplay { width, height } => want_size = Some((width, height)),
-                _ => {}
-            }
-        }
-
-        // Ask the server for a new desktop size (debounced: a window drag sends many).
-        if let Some((rw, rh)) = want_size {
-            if last_resize.elapsed() > Duration::from_millis(250) {
-                want_size = None;
-                last_resize = Instant::now();
-                let (rw, rh) = MonitorLayoutEntry::adjust_display_size(rw, rh);
-                if (rw, rh) != (w, h) {
-                    if let Some(f) = stage_.encode_resize(rw, rh, None, None) {
-                        frames.push(f.map_err(|e| anyhow!("resize: {e}"))?);
+    let mut redirects = 0;
+    'session: loop {
+        let (res, mut framed) = 'dial: {
+            while redirects <= 4 {
+                let (outcome, framed) = dial(cfg, &target, port, redirect.as_deref(), ev, &clip_tx, &clip_state)?;
+                match outcome {
+                    ConnectionOutcome::Connected(r) => break 'dial (r, framed),
+                    ConnectionOutcome::Redirected(p) => {
+                        redirects += 1;
+                        follow_redirect(cfg, ev, &p, &mut target, &mut port);
+                        redirect = Some(p);
                     }
                 }
             }
-        }
+            bail!("the server kept redirecting the session");
+        };
 
-        // Clipboard messages produced by the backend.
-        while let Ok(m) = clip_rx.try_recv() {
-            if let Some(f) = clipboard_frame(&mut stage_, m)? {
-                frames.push(f);
-            }
+        let (mut w, mut h) = (u32::from(res.desktop_size.width), u32::from(res.desktop_size.height));
+        let mut image = DecodedImage::new(PixelFormat::BgrA32, res.desktop_size.width, res.desktop_size.height);
+        {
+            let mut f = fb.lock().unwrap();
+            f.resize(w, h);
+            f.bgra = vec![0; (w * h * 4) as usize];
+            f.name = cfg.host.clone();
+            f.screens = requested_screens(&cfg.monitors).into_iter().filter(|s| s.x + s.w <= w && s.y + s.h <= h).collect();
+            f.version += 1;
         }
-        if last_housekeeping.elapsed() > Duration::from_secs(5) {
-            last_housekeeping = Instant::now();
-            if let Some(c) = stage_.get_svc_processor_mut::<CliprdrClient>() {
-                if let Ok(msgs) = c.drive_timeouts() {
-                    let f = stage_.process_svc_processor_messages(msgs).map_err(|e| anyhow!("clipboard: {e}"))?;
-                    if !f.is_empty() {
-                        frames.push(f);
+        let _ = ev.send(Event::Connected { width: w, height: h, name: cfg.host.clone() });
+        let activation = res.activation_factory.clone();
+        let mut stage_ = ActiveStageBuilder {
+            static_channels: res.static_channels,
+            user_channel_id: res.user_channel_id,
+            io_channel_id: res.io_channel_id,
+            message_channel_id: res.message_channel_id,
+            share_id: res.share_id,
+            compression_type: res.compression_type,
+            enable_server_pointer: res.enable_server_pointer,
+            pointer_software_rendering: res.pointer_software_rendering,
+        }
+        .build();
+
+        // Short reads, so input and clipboard work is never starved by a quiet server.
+        framed.get_inner_mut().0.sock.set_read_timeout(Some(POLL))?;
+
+        let mut keys = Keys::default();
+        let mut mouse = Mouse::default();
+        let mut dirty: Option<Rect> = None;
+        let mut last_publish = Instant::now();
+        let mut want_size: Option<(u32, u32)> = None;
+        let mut last_resize = Instant::now();
+        let mut last_housekeeping = Instant::now();
+        let mut channel_traffic: HashMap<u16, u32> = HashMap::new();
+
+        loop {
+            if stopping.load(Ordering::SeqCst) {
+                log::debug!("{}: PDUs received per channel id: {:?}", cfg.host, channel_traffic);
+                for o in stage_.graceful_shutdown().unwrap_or_default() {
+                    if let ActiveStageOutput::ResponseFrame(f) = o {
+                        let _ = framed.write_all(&f);
+                    }
+                }
+                return Ok(());
+            }
+
+            // Input.
+            let mut frames: Vec<Vec<u8>> = Vec::new();
+            while let Ok(i) = inputs.try_recv() {
+                match i {
+                    Input::Pointer { x, y, buttons } => {
+                        let evs = mouse.apply(x, y, buttons);
+                        send_input(&mut stage_, &mut image, &mut frames, &evs)?;
+                    }
+                    Input::Key { keysym, down } => {
+                        let evs = keys.key(keysym, down);
+                        send_input(&mut stage_, &mut image, &mut frames, &evs)?;
+                    }
+                    Input::Clipboard(text) => {
+                        clip_state.lock().unwrap().local = Some(text);
+                        let _ = clip_tx.send(ClipboardMessage::SendInitiateCopy(vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]));
+                    }
+                    Input::SendFiles(paths) => {
+                        let (descs, local) = describe_files(&paths);
+                        if !descs.is_empty() {
+                            let mut st = clip_state.lock().unwrap();
+                            st.offered_total = descs.iter().map(|d| d.file_size.unwrap_or(0)).sum();
+                            st.sent = 0;
+                            st.offered = local;
+                            drop(st);
+                            let _ = clip_tx.send(ClipboardMessage::SendInitiateFileCopy(descs));
+                        }
+                    }
+                    Input::UseVirtualDisplay { width, height } => want_size = Some((width, height)),
+                    _ => {}
+                }
+            }
+
+            // Ask the server for a new desktop size (debounced: a window drag sends many).
+            if let Some((rw, rh)) = want_size {
+                if last_resize.elapsed() > Duration::from_millis(250) {
+                    want_size = None;
+                    last_resize = Instant::now();
+                    let (rw, rh) = MonitorLayoutEntry::adjust_display_size(rw, rh);
+                    if (rw, rh) != (w, h) {
+                        if let Some(f) = stage_.encode_resize(rw, rh, None, None) {
+                            frames.push(f.map_err(|e| anyhow!("resize: {e}"))?);
+                        }
                     }
                 }
             }
-        }
-        // Replies to calls that waited (a smart card inserted, say).
-        if cfg.smartcard {
-            if let Some(r) = stage_.get_svc_processor_mut::<RdpdrChannel>() {
-                if let Ok(msgs) = r.0.poll_deferred_messages() {
-                    if !msgs.is_empty() {
-                        let f = stage_.process_svc_processor_messages(ironrdp_svc::SvcProcessorMessages::<RdpdrChannel>::new(msgs)).map_err(|e| anyhow!("smart card: {e}"))?;
+
+            // Clipboard messages produced by the backend.
+            while let Ok(m) = clip_rx.try_recv() {
+                if let Some(f) = clipboard_frame(&mut stage_, m)? {
+                    frames.push(f);
+                }
+            }
+            if last_housekeeping.elapsed() > Duration::from_secs(5) {
+                last_housekeeping = Instant::now();
+                if let Some(c) = stage_.get_svc_processor_mut::<CliprdrClient>() {
+                    if let Ok(msgs) = c.drive_timeouts() {
+                        let f = stage_.process_svc_processor_messages(msgs).map_err(|e| anyhow!("clipboard: {e}"))?;
                         if !f.is_empty() {
                             frames.push(f);
                         }
                     }
                 }
             }
-        }
-        for f in frames {
-            framed.write_all(&f).context("write to the server")?;
-        }
-
-        // Output from the server.
-        let (action, payload) = match framed.read_pdu() {
-            Ok(p) => p,
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                publish(&image, fb, &mut dirty, &mut last_publish, true);
-                continue;
-            }
-            Err(e) => return Err(anyhow!(e).context("connection lost")),
-        };
-        if matches!(action, ironrdp_pdu::Action::X224) && payload.len() > 12 {
-            // Which static channel this arrived on (MCS SendDataIndication: channel id at bytes 10..12).
-            *channel_traffic.entry(u16::from_be_bytes([payload[10], payload[11]])).or_insert(0u32) += 1;
-        }
-        for out in stage_.process(&mut image, action, &payload, framed.last_read_at()).map_err(|e| anyhow!("session error: {e}"))? {
-            match out {
-                ActiveStageOutput::ResponseFrame(f) => framed.write_all(&f).context("write to the server")?,
-                ActiveStageOutput::GraphicsUpdate(r) => {
-                    let r = Rect { l: u32::from(r.left), t: u32::from(r.top), r: u32::from(r.right), b: u32::from(r.bottom) };
-                    dirty = Some(dirty.map_or(r, |d| d.union(r)));
-                }
-                ActiveStageOutput::MonitorLayout(mons) => {
-                    let mut f = fb.lock().unwrap();
-                    f.screens = mons.iter().filter(|m| m.right >= m.left && m.bottom >= m.top && m.left >= 0 && m.top >= 0).map(|m| Screen { x: m.left as u32, y: m.top as u32, w: (m.right - m.left + 1) as u32, h: (m.bottom - m.top + 1) as u32 }).collect();
-                    f.version += 1;
-                }
-                ActiveStageOutput::DeactivateAll => {
-                    // The server is changing the desktop size: run the reactivation sequence.
-                    use connector::connection_activation::ConnectionActivationState;
-                    use connector::Sequence as _;
-                    let mut seq = activation.create();
-                    let mut buf = ironrdp_core::WriteBuf::new();
-                    // These reads must wait for the server, not give up after the short polling timeout.
-                    framed.get_inner_mut().0.sock.set_read_timeout(Some(Duration::from_secs(15)))?;
-                    loop {
-                        buf.clear();
-                        let written = if let Some(hint) = seq.next_pdu_hint() {
-                            let pdu = framed.read_by_hint(hint).map_err(|e| anyhow!("reactivation: {e}"))?;
-                            seq.step(&pdu, framed.last_read_at(), &mut buf).map_err(|e| anyhow!("reactivation: {e}"))?
-                        } else {
-                            seq.step_no_input(&mut buf).map_err(|e| anyhow!("reactivation: {e}"))?
-                        };
-                        if let Some(n) = written.size() {
-                            framed.write_all(&buf[..n]).context("write to the server")?;
-                        }
-                        if let ConnectionActivationState::Finalized { desktop_size, share_id, enable_server_pointer, pointer_software_rendering, static_channel_chunk_size, .. } = seq.connection_activation_state() {
-                            image = DecodedImage::new(PixelFormat::BgrA32, desktop_size.width, desktop_size.height);
-                            stage_.reactivate(seq.io_channel_id(), seq.user_channel_id(), share_id, enable_server_pointer, pointer_software_rendering, static_channel_chunk_size);
-                            (w, h) = (u32::from(desktop_size.width), u32::from(desktop_size.height));
-                            let mut f = fb.lock().unwrap();
-                            f.resize(w, h);
-                            f.bgra = vec![0; (w * h * 4) as usize];
-                            f.screens.clear();
-                            f.version += 1;
-                            dirty = Some(Rect { l: 0, t: 0, r: w - 1, b: h - 1 });
-                            drop(f);
-                            framed.get_inner_mut().0.sock.set_read_timeout(Some(POLL))?;
-                            // A copy made around the resize may have been lost: offer it again.
-                            if clip_state.lock().unwrap().local.is_some() {
-                                let _ = clip_tx.send(ClipboardMessage::SendInitiateCopy(vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]));
+            // Replies to calls that waited (a smart card inserted, say).
+            if cfg.smartcard {
+                if let Some(r) = stage_.get_svc_processor_mut::<RdpdrChannel>() {
+                    if let Ok(msgs) = r.0.poll_deferred_messages() {
+                        if !msgs.is_empty() {
+                            let f = stage_.process_svc_processor_messages(ironrdp_svc::SvcProcessorMessages::<RdpdrChannel>::new(msgs)).map_err(|e| anyhow!("smart card: {e}"))?;
+                            if !f.is_empty() {
+                                frames.push(f);
                             }
-                            break;
                         }
                     }
                 }
-                ActiveStageOutput::Terminate(reason) => {
+            }
+            for f in frames {
+                framed.write_all(&f).context("write to the server")?;
+            }
+
+            // Output from the server.
+            let (action, payload) = match framed.read_pdu() {
+                Ok(p) => p,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                     publish(&image, fb, &mut dirty, &mut last_publish, true);
-                    log::info!("{}: RDP session terminated: {}", cfg.host, reason.description());
-                    return Ok(());
+                    continue;
                 }
-                _ => {}
+                Err(e) => return Err(anyhow!(e).context("connection lost")),
+            };
+            if matches!(action, ironrdp_pdu::Action::X224) && payload.len() > 12 {
+                // Which static channel this arrived on (MCS SendDataIndication: channel id at bytes 10..12).
+                *channel_traffic.entry(u16::from_be_bytes([payload[10], payload[11]])).or_insert(0u32) += 1;
+            }
+            if let Some(p) = mid_session_redirect(action, &payload) {
+                redirects += 1;
+                if redirects > 4 {
+                    bail!("the server kept redirecting the session");
+                }
+                follow_redirect(cfg, ev, &p, &mut target, &mut port);
+                redirect = Some(Box::new(p));
+                continue 'session;
+            }
+            let outs = match stage_.process(&mut image, action, &payload, framed.last_read_at()) {
+                Ok(o) => o,
+                // GNOME Remote Desktop sends on dynamic channels the client declined (telemetry,
+                // audio); other clients ignore that, and so does this one.
+                Err(e) if format!("{e:?}").contains("non existing DVC channel") => {
+                    log::debug!("{}: ignored data on a declined dynamic channel", cfg.host);
+                    continue;
+                }
+                Err(e) => return Err(anyhow!("session error: {e}")),
+            };
+            for out in outs {
+                match out {
+                    ActiveStageOutput::ResponseFrame(f) => framed.write_all(&f).context("write to the server")?,
+                    ActiveStageOutput::GraphicsUpdate(r) => {
+                        let r = Rect { l: u32::from(r.left), t: u32::from(r.top), r: u32::from(r.right), b: u32::from(r.bottom) };
+                        dirty = Some(dirty.map_or(r, |d| d.union(r)));
+                    }
+                    ActiveStageOutput::MonitorLayout(mons) => {
+                        let mut f = fb.lock().unwrap();
+                        f.screens = mons.iter().filter(|m| m.right >= m.left && m.bottom >= m.top && m.left >= 0 && m.top >= 0).map(|m| Screen { x: m.left as u32, y: m.top as u32, w: (m.right - m.left + 1) as u32, h: (m.bottom - m.top + 1) as u32 }).collect();
+                        f.version += 1;
+                    }
+                    ActiveStageOutput::DeactivateAll => {
+                        // The server is changing the desktop size: run the reactivation sequence.
+                        use connector::connection_activation::ConnectionActivationState;
+                        use connector::Sequence as _;
+                        let mut seq = activation.create();
+                        let mut buf = ironrdp_core::WriteBuf::new();
+                        // These reads must wait for the server, not give up after the short polling timeout.
+                        framed.get_inner_mut().0.sock.set_read_timeout(Some(Duration::from_secs(15)))?;
+                        loop {
+                            buf.clear();
+                            let written = if let Some(hint) = seq.next_pdu_hint() {
+                                let pdu = framed.read_by_hint(hint).map_err(|e| anyhow!("reactivation: {e}"))?;
+                                seq.step(&pdu, framed.last_read_at(), &mut buf).map_err(|e| anyhow!("reactivation: {e}"))?
+                            } else {
+                                seq.step_no_input(&mut buf).map_err(|e| anyhow!("reactivation: {e}"))?
+                            };
+                            if let Some(n) = written.size() {
+                                framed.write_all(&buf[..n]).context("write to the server")?;
+                            }
+                            if let ConnectionActivationState::Finalized { desktop_size, share_id, enable_server_pointer, pointer_software_rendering, static_channel_chunk_size, .. } = seq.connection_activation_state() {
+                                image = DecodedImage::new(PixelFormat::BgrA32, desktop_size.width, desktop_size.height);
+                                stage_.reactivate(seq.io_channel_id(), seq.user_channel_id(), share_id, enable_server_pointer, pointer_software_rendering, static_channel_chunk_size);
+                                (w, h) = (u32::from(desktop_size.width), u32::from(desktop_size.height));
+                                let mut f = fb.lock().unwrap();
+                                f.resize(w, h);
+                                f.bgra = vec![0; (w * h * 4) as usize];
+                                f.screens.clear();
+                                f.version += 1;
+                                dirty = Some(Rect { l: 0, t: 0, r: w - 1, b: h - 1 });
+                                drop(f);
+                                framed.get_inner_mut().0.sock.set_read_timeout(Some(POLL))?;
+                                // A copy made around the resize may have been lost: offer it again.
+                                if clip_state.lock().unwrap().local.is_some() {
+                                    let _ = clip_tx.send(ClipboardMessage::SendInitiateCopy(vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    ActiveStageOutput::Terminate(reason) => {
+                        publish(&image, fb, &mut dirty, &mut last_publish, true);
+                        log::info!("{}: RDP session terminated: {}", cfg.host, reason.description());
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((gw, gh)) = paint_gfx(&mut stage_, fb, (w, h)) {
+                // The server resized the graphics output (ResetGraphics).
+                (w, h) = (gw, gh);
+                image = DecodedImage::new(PixelFormat::BgrA32, gw as u16, gh as u16);
+                dirty = None;
+            }
+            publish(&image, fb, &mut dirty, &mut last_publish, false);
+        }
+    }
+}
+
+/// Graphics pipeline events need no handling here: the client composites surfaces itself and
+/// [`paint_gfx`] drains the finished picture.
+struct Gfx;
+
+impl GraphicsPipelineHandler for Gfx {}
+
+/// Copies what the graphics pipeline finished painting into the framebuffer. Returns the new
+/// output size when the server resized it.
+fn paint_gfx(stage_: &mut ActiveStage, fb: &Arc<Mutex<Framebuffer>>, (w, h): (u32, u32)) -> Option<(u32, u32)> {
+    let mut gfx = stage_.get_svc_processor_mut::<DrdynvcClient>()?.get_dvc_mut::<GraphicsPipelineClient>()?;
+    let gfx = gfx.processor_mut();
+    let reset = gfx.take_output_reset().map(|(a, b)| (u32::from(a), u32::from(b))).filter(|&s| s != (w, h));
+    let updates = gfx.drain_output();
+    if reset.is_none() && updates.is_empty() {
+        return None;
+    }
+    let mut f = fb.lock().unwrap();
+    if let Some((nw, nh)) = reset {
+        f.resize(nw, nh);
+        f.bgra = vec![0; (nw * nh * 4) as usize];
+        f.screens.clear();
+    }
+    let (fw, fh) = (f.width as usize, f.height as usize);
+    for u in updates {
+        let (l, t) = (usize::from(u.region.left), usize::from(u.region.top));
+        let (uw, uh) = (usize::from(u.region.right).saturating_sub(l), usize::from(u.region.bottom).saturating_sub(t));
+        if uw == 0 || u.data.len() < uw * uh * 4 {
+            continue;
+        }
+        for (row, src) in u.data.chunks_exact(uw * 4).take(uh).enumerate() {
+            let y = t + row;
+            if y >= fh || l >= fw {
+                break;
+            }
+            let n = uw.min(fw - l);
+            let dst = &mut f.bgra[(y * fw + l) * 4..(y * fw + l + n) * 4];
+            // RGBA from the pipeline; the framebuffer is opaque BGRA.
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
             }
         }
-        publish(&image, fb, &mut dirty, &mut last_publish, false);
     }
+    f.version += 1;
+    f.wake();
+    reset
+}
+
+// ----- server redirection -----------------------------------------------------------
+
+/// Points the next connection at a redirect's target; with none named, the same host again.
+fn follow_redirect(cfg: &Config, ev: &Sender<Event>, p: &ServerRedirectionPdu, target: &mut String, port: &mut u16) {
+    let next = p.target_net_address.clone().or_else(|| p.target_fqdn.clone()).or_else(|| p.target_net_addresses.as_ref().and_then(|a| a.first().cloned()));
+    log::info!("{}: the server redirected the session to {next:?}", cfg.host);
+    if let Some(n) = next {
+        *target = n;
+        *port = cfg.port;
+    }
+    stage(ev, "Redirected to another server…");
+}
+
+/// The load-balancing info of a redirect, as the X.224 routing token (without its CRLF).
+fn routing_token(p: &ServerRedirectionPdu) -> Option<String> {
+    let lb = p.load_balance_info.as_deref()?;
+    Some(String::from_utf8_lossy(lb).trim_end_matches(['\r', '\n', '\0']).to_owned()).filter(|t| !t.is_empty())
+}
+
+/// A Server Redirection PDU arriving after the session started (GNOME Remote Desktop hands
+/// a login over to the user's own session this way).
+///
+/// GNOME (FreeRDP) writes PDU version 1 in the Share Control header and pads the packet
+/// differently from [MS-RDPBCGR] 2.2.13.3.1, which ironrdp's decoder rejects, so the
+/// redirection packet is found by its `SEC_REDIRECTION_PKT` flags instead.
+fn mid_session_redirect(action: ironrdp_pdu::Action, payload: &[u8]) -> Option<ServerRedirectionPdu> {
+    const PDUTYPE_SERVER_REDIR_PKT: u16 = 0x000A;
+    const SEC_REDIRECTION_PKT: [u8; 2] = [0x00, 0x04];
+    if action != ironrdp_pdu::Action::X224 {
+        return None;
+    }
+    let data = ironrdp_pdu::mcs::decode_send_data_indication(payload).ok()?.user_data;
+    let header = data.get(..6)?;
+    if u16::from_le_bytes([header[2], header[3]]) & 0x000F != PDUTYPE_SERVER_REDIR_PKT {
+        return None;
+    }
+    // The packet follows the 6-byte header and a few bytes of padding.
+    (6..data.len().min(16)).filter(|&i| data[i..].starts_with(&SEC_REDIRECTION_PKT)).find_map(|i| match ironrdp_core::decode::<ServerRedirectionPdu>(&data[i..]) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            log::debug!("not a redirection packet at offset {i}: {e}");
+            None
+        }
+    })
+}
+
+/// X.224 negotiation for an RDSTLS reconnection: asks for RDSTLS only and sends the
+/// redirect's routing token, which ironrdp's connector cannot do, then leaves the
+/// connector ready for the TLS upgrade.
+fn rdstls_negotiate(framed: &mut Framed<TcpStream>, conn: &mut ClientConnector, p: &ServerRedirectionPdu) -> Result<()> {
+    use ironrdp_pdu::nego::{ConnectionConfirm, ConnectionRequest, ConnectionRequestWithOpaqueRoutingToken, OpaqueRoutingToken, RequestFlags, SecurityProtocol};
+    use ironrdp_pdu::x224::X224;
+    let token = routing_token(p).context("the server's redirect has no routing token")?;
+    let request = ConnectionRequestWithOpaqueRoutingToken {
+        request: ConnectionRequest { nego_data: None, flags: RequestFlags::empty(), protocol: SecurityProtocol::RDSTLS, correlation_info: None },
+        routing_token: OpaqueRoutingToken(token),
+    };
+    framed.write_all(&ironrdp_core::encode_vec(&X224(request)).map_err(|e| anyhow!("RDP negotiation: {e}"))?).context("write to the server")?;
+    let (_, pdu) = framed.read_pdu().context("RDP negotiation")?;
+    match ironrdp_core::decode::<X224<ConnectionConfirm>>(&pdu).map_err(|e| anyhow!("RDP negotiation: {e}"))?.0 {
+        ConnectionConfirm::Response { protocol, .. } if protocol.contains(SecurityProtocol::RDSTLS) => {}
+        other => bail!("the server would not resume the redirected session (RDSTLS): {other:?}"),
+    }
+    // The connector reads the confirmation itself, so it also keeps the server's flags
+    // (whether to ask for the message channel, among others).
+    use connector::Sequence as _;
+    conn.state = connector::ClientConnectorState::ConnectionInitiationWaitConfirm { requested_protocol: SecurityProtocol::RDSTLS };
+    conn.step(&pdu, framed.last_read_at(), &mut ironrdp_core::WriteBuf::new()).map_err(|e| anyhow!("RDP negotiation: {e}"))?;
+    Ok(())
+}
+
+/// RDSTLS sign-in ([MS-RDPBCGR] 2.2.17): after the server's capabilities, send the redirect's
+/// GUID, user name and encrypted password back, and wait for the result.
+fn rdstls_authenticate(s: &mut (impl std::io::Read + Write), p: &ServerRedirectionPdu) -> Result<()> {
+    const VERSION_1: u16 = 1;
+    const TYPE_CAPABILITIES: u16 = 1;
+    const TYPE_AUTH_REQUEST: u16 = 2;
+    const TYPE_AUTH_RESPONSE: u16 = 4;
+    const DATA_PASSWORD_CREDS: u16 = 1;
+    let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+
+    let mut caps = [0u8; 8];
+    s.read_exact(&mut caps).context("RDSTLS: no capabilities from the server")?;
+    if u16_at(&caps, 2) != TYPE_CAPABILITIES || u16_at(&caps, 6) & VERSION_1 == 0 {
+        bail!("RDSTLS: unexpected capabilities {caps:02x?}");
+    }
+
+    let mut req = Vec::new();
+    for v in [VERSION_1, TYPE_AUTH_REQUEST, DATA_PASSWORD_CREDS] {
+        req.extend(v.to_le_bytes());
+    }
+    let mut data = |bytes: &[u8]| -> Result<()> {
+        req.extend(u16::try_from(bytes.len()).context("RDSTLS field too long")?.to_le_bytes());
+        req.extend(bytes);
+        Ok(())
+    };
+    // Strings are UTF-16LE with their terminating NUL.
+    let text = |s: Option<&str>| -> Vec<u8> { s.unwrap_or("").encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect() };
+    data(p.redirection_guid.as_deref().unwrap_or(&[]))?;
+    data(&text(p.username.as_deref()))?;
+    data(&text(p.domain.as_deref()))?;
+    data(p.password.as_deref().unwrap_or(&[]))?;
+    s.write_all(&req).context("RDSTLS: write to the server")?;
+    s.flush().ok();
+
+    let mut resp = [0u8; 10];
+    s.read_exact(&mut resp).context("RDSTLS: the server closed the connection")?;
+    let code = u32::from_le_bytes([resp[6], resp[7], resp[8], resp[9]]);
+    if u16_at(&resp, 2) != TYPE_AUTH_RESPONSE || code != 0 {
+        bail!("the server refused the redirected sign-in (RDSTLS result {code:#x})");
+    }
+    Ok(())
 }
 
 fn send_input(stage_: &mut ActiveStage, image: &mut DecodedImage, frames: &mut Vec<Vec<u8>>, evs: &[FastPathInputEvent]) -> Result<()> {
@@ -1203,10 +1403,21 @@ fn st_dir(p: &std::path::Path) -> PathBuf {
 
 // ----- audio -------------------------------------------------------------------------
 
+/// Opening the output can take seconds (WASAPI), so it happens on its own thread while the
+/// connection is made; sound that arrives before it is ready is dropped.
 struct Sound {
-    player: PcmPlayer,
+    player: Option<PcmPlayer>,
+    opening: Option<Receiver<Option<PcmPlayer>>>,
     formats: Vec<AudioFormat>,
     waves: u64,
+}
+
+fn open_audio() -> Receiver<Option<PcmPlayer>> {
+    let (tx, rx) = channel();
+    let _ = std::thread::Builder::new().name("rdp-audio-open".into()).spawn(move || {
+        let _ = tx.send(PcmPlayer::start());
+    });
+    rx
 }
 
 impl std::fmt::Debug for Sound {
@@ -1216,10 +1427,10 @@ impl std::fmt::Debug for Sound {
 }
 
 impl Sound {
-    fn new(player: PcmPlayer) -> Self {
+    fn new(opening: Receiver<Option<PcmPlayer>>) -> Self {
         let pcm = |rate: u32| AudioFormat { format: WaveFormat::PCM, n_channels: 2, n_samples_per_sec: rate, n_avg_bytes_per_sec: rate * 4, n_block_align: 4, bits_per_sample: 16, data: None };
         // Only the rate the output plays at, so no resampling is needed.
-        Self { player, formats: vec![pcm(PcmPlayer::RATE)], waves: 0 }
+        Self { player: None, opening: Some(opening), formats: vec![pcm(PcmPlayer::RATE)], waves: 0 }
     }
 }
 
@@ -1233,7 +1444,22 @@ impl RdpsndClientHandler for Sound {
         if self.waves == 1 || self.waves % 500 == 0 {
             log::debug!("RDP audio: {} wave blocks received ({} bytes in the latest)", self.waves, data.len());
         }
-        self.player.push(data.into_owned());
+        if let Some(rx) = &self.opening {
+            match rx.try_recv() {
+                Ok(player) => {
+                    if player.is_none() {
+                        log::warn!("RDP audio unavailable; the session will be silent");
+                    }
+                    self.player = player;
+                    self.opening = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.opening = None,
+            }
+        }
+        if let Some(p) = &self.player {
+            p.push(data.into_owned());
+        }
     }
 
     fn set_volume(&mut self, _: ironrdp_rdpsnd::pdu::VolumePdu) {}
