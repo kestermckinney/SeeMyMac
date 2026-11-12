@@ -85,6 +85,9 @@ pub struct Session {
     pointer_target: u8,
     /// Where the shown monitor sits in the remote framebuffer (for pointer events).
     offset: (u16, u16),
+    /// Where each monitor's picture sits in the remote framebuffer (monitor, x, y), for
+    /// "Span all local monitors", which shows every monitor at once.
+    origins: Vec<(usize, u16, u16)>,
     /// The connection's multi-monitor preference was applied (once per session).
     multi_applied: bool,
     /// The clipboard text both sides last agreed on (sent there or received from
@@ -195,6 +198,8 @@ pub struct App {
     pub area: Rc<Cell<Bounds<Pixels>>>,
     /// This computer's monitors (x, y, width, height), for asking an RDP server for the same layout.
     local_displays: Vec<rdp::MonitorRect>,
+    /// The same displays' ids, in the same order (primary first, then left to right).
+    local_display_ids: Vec<DisplayId>,
     pub held_keys: HashMap<String, u32>,
     pub held_mods: Modifiers,
     pub buttons: u8,
@@ -204,6 +209,13 @@ pub struct App {
     clip_checked: Instant,
     /// System-shortcut inhibitor for the real window (None in tests).
     pub shortcuts: Option<crate::inhibit::Shortcuts>,
+    /// "Span all local monitors" is showing: the main window shows remote monitor `span_main`
+    /// and `span_windows` cover the other local displays.
+    pub span: bool,
+    pub span_main: usize,
+    /// The extra windows, when each opened and how many times it was asked to go full screen.
+    span_windows: Vec<(AnyWindowHandle, Instant, u8)>,
+    span_opening: bool,
     _poll: Option<Task<()>>,
 }
 
@@ -282,6 +294,11 @@ impl App {
             last_input: None,
             clip_checked: Instant::now(),
             shortcuts: None,
+            local_display_ids: vec![],
+            span: false,
+            span_main: 0,
+            span_windows: vec![],
+            span_opening: false,
             _poll: None,
         };
         // Wake for each new picture (so it is drawn at once, not up to a poll
@@ -344,6 +361,7 @@ impl App {
                 seen_stream2: 0,
                 pointer_target: 0,
                 offset: (0, 0),
+                origins: vec![],
                 multi_applied: false,
                 clip_synced: None,
                 file_note: None,
@@ -531,7 +549,7 @@ impl App {
 
     pub(crate) fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_clipboard(window, cx);
-        self.local_displays = cx.displays().iter().map(|d| { let b = d.bounds(); rdp::MonitorRect { x: f32::from(b.origin.x) as i32, y: f32::from(b.origin.y) as i32, w: f32::from(b.size.width) as u32, h: f32::from(b.size.height) as u32 } }).collect();
+        (self.local_display_ids, self.local_displays) = local_displays(cx).into_iter().unzip();
         let mut changed = false;
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
         let mut prompt: Option<(String, String)> = None;
@@ -692,7 +710,17 @@ impl App {
                 changed = true;
             }
             let mon = self.st.monitor(&id);
-            let eff_mon = if active { mon } else { Mon::One };
+            // Spanning shows every monitor at once (one per local display).
+            let span = active
+                && window.is_fullscreen()
+                && self.local_displays.len() > 1
+                && s.monitors > 1
+                && conn.as_ref().map_or(false, |c| c.proto == Proto::Rdp && c.span_monitors);
+            if active && self.span != span {
+                self.span = span;
+                changed = true;
+            }
+            let eff_mon = if span { Mon::All } else if active { mon } else { Mon::One };
             let mut retired = vec![];
             if !displays.is_empty() || h.fb2.is_some() || version > 0 && h.fb.lock().unwrap().whole_frames {
                 // The handle is lent out so the refresh can update the session too.
@@ -715,6 +743,7 @@ impl App {
                         _ => vec![(0, f.monitor_rect(usize::MAX))],
                     };
                     s.offset = rects.first().map_or((0, 0), |(_, r)| (r.x as u16, r.y as u16));
+                    s.origins = rects.iter().map(|(m, r)| (*m, r.x as u16, r.y as u16)).collect();
                     if f.bgra.len() < (f.width * f.height * 4) as usize {
                         vec![] // nothing received yet
                     } else {
@@ -742,6 +771,7 @@ impl App {
         if layout_learnt {
             self.persist();
         }
+        self.sync_span_windows(window, cx);
         if let Some(slot) = &self.hp_check {
             let done = slot.lock().unwrap().take();
             if let Some(text) = done {
@@ -1459,6 +1489,30 @@ impl App {
     }
 
     pub fn pointer(&mut self, pos: Point<Pixels>, buttons: Option<u8>, down: Option<bool>) {
+        let mon = self.span.then_some(self.span_main);
+        let area = self.area.get();
+        self.pointer_at(mon, area, pos, buttons, down);
+    }
+
+    /// The remote position under `pos` (relative to `area`, the window's remote-screen area) when
+    /// showing remote monitor `mon` (None: the one shown), and the monitor's offset in the desktop.
+    fn remote_xy(&self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>) -> Option<((u16, u16), (u16, u16))> {
+        let s = self.active_session()?;
+        let tile = match mon {
+            Some(m) => s.tiles.iter().find(|t| t.monitor == m)?,
+            None => s.tiles.first()?,
+        };
+        let rel_x = f32::from(pos.x - area.origin.x);
+        let rel_y = f32::from(pos.y - area.origin.y);
+        let xy = geometry::to_remote(f32::from(area.size.width), f32::from(area.size.height), tile.size.0, tile.size.1, s.scaling, rel_x, rel_y)?;
+        let offset = match mon {
+            Some(m) => s.origins.iter().find(|o| o.0 == m).map_or(s.offset, |o| (o.1, o.2)),
+            None => s.offset,
+        };
+        Some((xy, offset))
+    }
+
+    pub fn pointer_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>, buttons: Option<u8>, down: Option<bool>) {
         // Explain dropped clicks (not moves, which are too frequent to log).
         let why = |reason: &str| {
             if buttons.is_some() {
@@ -1469,20 +1523,18 @@ impl App {
             return why(&format!("{:?} panel is open", self.st.view));
         }
         let Some(s) = self.active_session() else { return why("no active session") };
-        let Some(tile) = s.tiles.first() else { return why("no picture yet") };
-        if self.st.active.as_deref().map_or(false, |id| self.st.monitor(id) == Mon::All) && s.tiles.len() > 1 {
+        if s.tiles.is_empty() {
+            return why("no picture yet");
+        }
+        if mon.is_none() && self.st.active.as_deref().map_or(false, |id| self.st.monitor(id) == Mon::All) && s.tiles.len() > 1 {
             return why("\"Both monitors\" view"); // clicking zooms in, handled by the view
         }
-        let area = self.area.get();
-        let rel_x = f32::from(pos.x - area.origin.x);
-        let rel_y = f32::from(pos.y - area.origin.y);
-        let Some((x, y)) = geometry::to_remote(f32::from(area.size.width), f32::from(area.size.height), tile.size.0, tile.size.1, s.scaling, rel_x, rel_y) else { return why("outside the picture") };
+        let Some(((x, y), (ox, oy))) = self.remote_xy(mon, area, pos) else { return why("outside the picture") };
         if let (Some(b), Some(d)) = (buttons, down) {
             log::debug!("click: button {b} {} at remote {x},{y}", if d { "down" } else { "up" });
         }
-        // Offset into the shown monitor within the whole framebuffer (worked out
-        // when the picture was built, so mouse moves never wait on its lock).
-        let (ox, oy) = s.offset;
+        // The offset into the shown monitor within the whole framebuffer is worked out
+        // when the picture was built, so mouse moves never wait on its lock.
         if let (Some(mask), Some(d)) = (buttons, down) {
             self.last_input = Some(Instant::now());
             if d {
@@ -1496,21 +1548,105 @@ impl App {
     }
 
     pub fn scroll(&mut self, pos: Point<Pixels>, dy: f32) {
+        let mon = self.span.then_some(self.span_main);
+        let area = self.area.get();
+        self.scroll_at(mon, area, pos, dy);
+    }
+
+    pub fn scroll_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>, dy: f32) {
         if dy == 0.0 {
             return;
         }
-        self.pointer(pos, None, None);
+        self.pointer_at(mon, area, pos, None, None);
         let mask = if dy > 0.0 { 8 } else { 16 }; // button 4 = up, 5 = down
         let b = self.buttons;
-        if let Some(s) = self.active_session() {
-            if let (Some(h), Some(t)) = (&s.handle, s.tiles.first()) {
-                let area = self.area.get();
-                let (x, y) = geometry::to_remote(f32::from(area.size.width), f32::from(area.size.height), t.size.0, t.size.1, s.scaling, f32::from(pos.x - area.origin.x), f32::from(pos.y - area.origin.y)).unwrap_or((0, 0));
-                let (x, y) = (x + s.offset.0, y + s.offset.1);
-                h.send(Input::Pointer { x, y, buttons: b | mask });
-                h.send(Input::Pointer { x, y, buttons: b });
+        let ((x, y), (ox, oy)) = self.remote_xy(mon, area, pos).unwrap_or(((0, 0), self.active_session().map_or((0, 0), |s| s.offset)));
+        let (x, y) = (x + ox, y + oy);
+        self.send(Input::Pointer { x, y, buttons: b | mask });
+        self.send(Input::Pointer { x, y, buttons: b });
+    }
+
+    /// The picture of remote monitor `m` for a spanning window: image, size and scaling.
+    pub fn span_tile(&self, m: usize) -> Option<(Arc<RenderImage>, (u32, u32), Scaling)> {
+        if !self.span {
+            return None;
+        }
+        let s = self.active_session()?;
+        let t = s.tiles.iter().find(|t| t.monitor == m)?;
+        Some((t.image.clone(), t.size, s.scaling))
+    }
+
+    /// Open or close the extra full-screen windows that "Span all local monitors" needs.
+    fn sync_span_windows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Forget windows the user closed.
+        self.span_windows.retain(|(h, _, _)| h.update(cx, |_, _, _| ()).is_ok());
+        // A window asked to open full screen is often not yet in that state (it was not on screen
+        // when asked), so ask again once it has settled, a few times at most.
+        for (h, opened, tries) in &mut self.span_windows {
+            if *tries < 4 && opened.elapsed() > Duration::from_millis(400 * (*tries as u64 + 1)) {
+                *tries += 1;
+                let _ = h.update(cx, |_, w, _| {
+                    if !w.is_fullscreen() {
+                        w.toggle_fullscreen();
+                    }
+                });
             }
         }
+        let displays = self.local_display_ids.clone();
+        if let Some(d) = window.display(cx) {
+            if let Some(i) = displays.iter().position(|x| *x == d.id()) {
+                self.span_main = i;
+            }
+        }
+        let wanted: Vec<usize> = if self.span {
+            let have = self.active_session().map_or(0, |s| s.tiles.len());
+            (0..displays.len().min(have)).filter(|i| *i != self.span_main).collect()
+        } else {
+            vec![]
+        };
+        if wanted.is_empty() {
+            for (h, _, _) in self.span_windows.drain(..) {
+                let _ = h.update(cx, |_, w, _| w.remove_window());
+            }
+            return;
+        }
+        if self.span_windows.len() == wanted.len() || self.span_opening {
+            return;
+        }
+        for (h, _, _) in self.span_windows.drain(..) {
+            let _ = h.update(cx, |_, w, _| w.remove_window());
+        }
+        // A new window draws as soon as it opens, and its picture is read from this app, so
+        // it must open after the current update has finished (not inside it).
+        self.span_opening = true;
+        let app = cx.entity();
+        let main = window.window_handle();
+        let sizes = self.local_displays.clone();
+        let displays: Vec<_> = wanted.iter().map(|i| (*i, displays[*i], sizes[*i])).collect();
+        cx.defer(move |cx| {
+            let mut handles = vec![];
+            for (i, id, r) in displays {
+                let app = app.clone();
+                let options = gpui::WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Fullscreen(Bounds::new(point(px(0.0), px(0.0)), size(px(r.w as f32), px(r.h as f32))))),
+                    // A title bar (hidden) is what lets macOS take the window full screen.
+                    titlebar: Some(TitlebarOptions { title: Some("SeeMyMac".into()), appears_transparent: true, ..Default::default() }),
+                    is_resizable: true,
+                    focus: false,
+                    display_id: Some(id),
+                    ..Default::default()
+                };
+                match cx.open_window(options, move |w, cx| cx.new(|cx| crate::span::SpanScreen::new(app, main, i, w, cx))) {
+                    Ok(h) => handles.push((AnyWindowHandle::from(h), Instant::now(), 0)),
+                    Err(e) => log::warn!("could not open a window for monitor {}: {e:#}", i + 1),
+                }
+            }
+            let _ = main.update(cx, |_, w, _| w.activate_window());
+            app.update(cx, |a, _| {
+                a.span_windows = handles;
+                a.span_opening = false;
+            });
+        });
     }
 
     // ----- window state -----------------------------------------------------
@@ -1668,4 +1804,25 @@ mod candidate_tests {
             ["/Users/me/Desktop/a.txt", "/Users/me/Documents/a.txt", "/Users/me/Downloads/a.txt", "/Users/me/a.txt"]
         );
     }
+}
+
+/// This computer's displays with their real places on the desktop, primary first, then left to
+/// right. (gpui reports every macOS display at 0, 0, which made the remote monitors overlap.)
+fn local_displays(cx: &gpui::App) -> Vec<(DisplayId, rdp::MonitorRect)> {
+    let mut v: Vec<(DisplayId, rdp::MonitorRect)> = cx
+        .displays()
+        .iter()
+        .map(|d| {
+            let b = d.bounds();
+            let mut r = rdp::MonitorRect { x: f32::from(b.origin.x) as i32, y: f32::from(b.origin.y) as i32, w: f32::from(b.size.width) as u32, h: f32::from(b.size.height) as u32 };
+            #[cfg(target_os = "macos")]
+            {
+                let g = core_graphics::display::CGDisplay::new(u32::from(d.id())).bounds();
+                (r.x, r.y) = (g.origin.x as i32, g.origin.y as i32);
+            }
+            (d.id(), r)
+        })
+        .collect();
+    v.sort_by_key(|(_, r)| ((r.x, r.y) != (0, 0), r.x, r.y));
+    v
 }
