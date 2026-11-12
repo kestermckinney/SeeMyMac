@@ -1270,6 +1270,49 @@ impl Render for App {
             .when(self.st.pinned, |d| d.child(self.toolbar(cx)))
             .child(area)
             .when(!NATIVE_FRAME && !self.st.full && !window.is_maximized(), |d| d.child(self.resize_handles()))
+            .when(cfg!(windows), |d| {
+                // Characters sent as Unicode input (as Remote Desktop clients do) only reach
+                // the app through a text input handler; see `App::type_text`.
+                let (focus, entity) = (self.focus.clone(), cx.entity());
+                d.child(
+                    canvas(|_, _, _| (), move |bounds, _, window, cx| window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
+    }
+}
+
+impl EntityInputHandler for App {
+    fn text_for_range(&mut self, _: std::ops::Range<usize>, _: &mut Option<std::ops::Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        None
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+
+    fn replace_text_in_range(&mut self, _: Option<std::ops::Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.type_text(text, cx);
+    }
+
+    // Dead keys and IME composition: the finished character arrives with its key down.
+    fn replace_and_mark_text_in_range(&mut self, _: Option<std::ops::Range<usize>>, _: &str, _: Option<std::ops::Range<usize>>, _: &mut Window, _: &mut Context<Self>) {}
+
+    fn bounds_for_range(&mut self, _: std::ops::Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        None
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
     }
 }
 

@@ -235,6 +235,22 @@ fn dialog_typing_validation_and_save(cx: &mut TestAppContext) {
     });
 }
 
+/// Remote Desktop clients often send characters as Unicode input (VK_PACKET), which skips
+/// the key-down event and arrives only through the text input handler.
+#[gpui::test]
+fn dialog_accepts_text_without_key_down(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    cx.update(|_, cx| view.update(cx, |a, cx| a.type_text("Jump é", cx)));
+    cx.simulate_keystrokes("tab");
+    cx.update(|_, cx| view.update(cx, |a, cx| a.type_text("10.0.0.5", cx)));
+    view.read_with(cx, |a, _| {
+        let d = &a.form.as_ref().unwrap().draft;
+        assert_eq!((d.name.as_str(), d.host.as_str()), ("Jump é", "10.0.0.5"));
+    });
+}
+
 #[gpui::test]
 fn text_fields_edit_at_keyboard_and_mouse_cursor(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));

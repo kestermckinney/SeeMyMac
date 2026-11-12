@@ -1540,6 +1540,7 @@ impl App {
             if let Some(ch) = k.key_char.as_deref().filter(|c| c.chars().all(|c| !c.is_control())) {
                 let ch = ch.to_string();
                 self.edit_field("insert", Some(&ch), false);
+                consume_typed_key(cx);
             }
         }
         if self.field == Field::Manage {
@@ -1594,7 +1595,12 @@ impl App {
         }
 
         match self.st.view {
-            View::Idle => self.forward_key(ev, true),
+            View::Idle => {
+                self.forward_key(ev, true);
+                if k.key_char.as_deref().map_or(false, |c| c.chars().any(|c| !c.is_control())) {
+                    consume_typed_key(cx);
+                }
+            }
             View::Switcher => {
                 if k.key == "escape" {
                     self.close_overlay(window, cx);
@@ -1624,6 +1630,40 @@ impl App {
             self.last_input = Some(Instant::now());
             self.held_keys.insert(k.key.clone(), sym);
             self.send(Input::Key { keysym: sym, down: true });
+        }
+    }
+
+    /// Text that arrives without a key-down event: on Windows, characters sent as Unicode
+    /// input (VK_PACKET), as Remote Desktop clients often do, only reach the app as WM_CHAR,
+    /// which gpui hands to the text input handler. Type it into the open field, or send it
+    /// to the Mac as key presses.
+    pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        if text.is_empty() {
+            return;
+        }
+        match self.st.view {
+            View::Idle => {
+                for c in text.chars() {
+                    let s = c.to_string();
+                    if let Some(sym) = rfb::keysym(&s, Some(&s)) {
+                        self.last_input = Some(Instant::now());
+                        self.send(Input::Key { keysym: sym, down: true });
+                        self.send(Input::Key { keysym: sym, down: false });
+                    }
+                }
+            }
+            View::Switcher => {}
+            _ => {
+                self.edit_field("insert", Some(&text), false);
+                if self.field == Field::Manage {
+                    self.confirm_delete = None;
+                }
+                if let Some(f) = &mut self.form {
+                    f.error = None;
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -2127,4 +2167,13 @@ fn local_displays(cx: &gpui::App) -> Vec<(DisplayId, rdp::MonitorRect)> {
         .collect();
     v.sort_by_key(|(_, r)| ((r.x, r.y) != (0, 0), r.x, r.y));
     v
+}
+
+/// Marks a typed character as handled. On Windows an unhandled key down is translated into
+/// WM_CHAR, which gpui passes to the text input handler (`App::type_text`), so the character
+/// would arrive twice.
+fn consume_typed_key(cx: &mut Context<App>) {
+    if cfg!(windows) {
+        cx.stop_propagation();
+    }
 }
