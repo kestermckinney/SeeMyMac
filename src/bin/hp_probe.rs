@@ -11,7 +11,9 @@
 //! (SEEMYMAC_PROBE_W / SEEMYMAC_PROBE_H size that display). SEEMYMAC_PROBE_POINTER
 //! scripts steps 2 s apart: "x,y" moves, "x,y,c" clicks, "esc", "k:HEX" taps a
 //! keysym, and "disp:N" / "disp:all" asks the Mac to stream display N (0-based) or
-//! all of them. SEEMYMAC_PROBE_CLIP="text" puts that text on the Mac's clipboard
+//! all of them; "wait" skips a step, "pass" types the password and Return (to
+//! unlock the Mac) and "virt" / "virt:WxH" moves to a virtual display mid-session.
+//! SEEMYMAC_PROBE_CLIP="text" puts that text on the Mac's clipboard
 //! 2 s after the first picture; the Mac's clipboard is reported (as a length, and
 //! whether it matches) whenever it changes.
 
@@ -43,6 +45,7 @@ fn main() {
         None => host,
     };
     println!("connecting to {host} as {username:?} (password {} chars)", password.chars().count());
+    let typed = password.clone();
     let cfg = hp::Config {
         host,
         port: 5900,
@@ -67,6 +70,19 @@ fn main() {
         .filter_map(|p| {
             if p.trim() == "esc" {
                 return Some((0, 0, "esc"));
+            }
+            // "wait" does nothing for a step; "pass" types the connection's password and
+            // Return (to unlock the Mac); "virt" / "virt:WxH" moves to a virtual display
+            // mid-session, as the app does.
+            match p.trim() {
+                "wait" => return Some((0, 0, "wait")),
+                "pass" => return Some((0, 0, "pass")),
+                "virt" => return Some((1920, 1080, "virt")),
+                _ => {}
+            }
+            if let Some(d) = p.trim().strip_prefix("virt:") {
+                let (w, h) = d.split_once('x')?;
+                return Some((w.parse().ok()?, h.parse().ok()?, "virt"));
             }
             if let Some(d) = p.trim().strip_prefix("disp:") {
                 // "disp:all" shows every display combined; "disp:N" display N (0-based).
@@ -137,6 +153,21 @@ fn main() {
                         let id = (x != u16::MAX).then(|| displays.get(x as usize).map_or(x as u32, |d| d.id));
                         println!("[{:6.2}s] show display {id:?} (displays {displays:?})", t0.elapsed().as_secs_f32());
                         h.send(Input::ShowDisplay(id));
+                    } else if what == "wait" {
+                    } else if what == "virt" {
+                        println!("[{:6.2}s] use a {x}x{y} virtual display", t0.elapsed().as_secs_f32());
+                        h.send(Input::UseVirtualDisplay { width: x as u32, height: y as u32 });
+                    } else if what == "pass" {
+                        // Never printed: only that it was typed.
+                        println!("[{:6.2}s] type the password and Return", t0.elapsed().as_secs_f32());
+                        for c in typed.chars() {
+                            let keysym = if (c as u32) < 0x100 { c as u32 } else { 0x0100_0000 + c as u32 };
+                            h.send(Input::Key { keysym, down: true });
+                            h.send(Input::Key { keysym, down: false });
+                            std::thread::sleep(Duration::from_millis(40));
+                        }
+                        h.send(Input::Key { keysym: 0xff0d, down: true });
+                        h.send(Input::Key { keysym: 0xff0d, down: false });
                     } else if what == "keydown" || what == "keyup" {
                         println!("[{:6.2}s] {what} {x:#x}", t0.elapsed().as_secs_f32());
                         h.send(Input::Key { keysym: x as u32, down: what == "keydown" });
