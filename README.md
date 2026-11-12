@@ -229,7 +229,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\build-windows.ps1 -Test
 The script finds the Windows SDK's `fxc.exe` shader compiler for GPUI. Use
 `-Release` for an optimized build, or omit `-Test` to build without tests.
 
-To build Windows installers, install Inno Setup 6 and LLVM/Clang in addition to
+To build Windows installers, install Inno Setup 6, NASM (`winget install NASM.NASM`, needed for the x86 build) and LLVM/Clang in addition to
 the Rust MSVC toolchain and Visual Studio C++ tools (including the ARM64 and x86
 target tools and Windows SDK). Then run:
 

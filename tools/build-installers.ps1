@@ -24,6 +24,13 @@ if (-not $env:GPUI_FXC_PATH) {
 if (-not $env:GPUI_FXC_PATH) { throw 'Install the Windows SDK with fxc.exe or set GPUI_FXC_PATH.' }
 $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
 if (Test-Path $llvm) { $env:Path = "$llvm;$env:Path" }
+# aws-lc-sys (TLS for the RDP gateway) needs NASM to build for 32-bit x86.
+if (-not (Get-Command nasm.exe -ErrorAction SilentlyContinue)) {
+    $nasm = @("$env:LOCALAPPDATA\bin\NASM", "$env:ProgramFiles\NASM", "${env:ProgramFiles(x86)}\NASM") |
+        Where-Object { Test-Path (Join-Path $_ 'nasm.exe') } | Select-Object -First 1
+    if (-not $nasm) { throw 'Install NASM (winget install NASM.NASM) to build for x86.' }
+    $env:Path = "$nasm;$env:Path"
+}
 $metadata = & $cargo metadata --manifest-path (Join-Path $root 'Cargo.toml') --locked --no-deps --format-version 1 | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
 $version = ($metadata.packages | Where-Object { $_.name -eq 'see_my_mac' } | Select-Object -First 1).version
