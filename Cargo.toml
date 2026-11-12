@@ -109,6 +109,8 @@ codegen-units = 1
 xattr = { path = "vendor/xattr" }
 # rust_h264 plus a P_Skip fill for Apple's truncated slices (see Decoder::set_fill_truncated_p_slices).
 rust_h264 = { path = "vendor/rust_h264" }
+# gpui with a Wayland clipboard read that can't freeze the window (see vendor/gpui/PATCHED.md).
+gpui = { path = "vendor/gpui" }
 
 [dev-dependencies]
 gpui = { version = "0.2.2", features = ["test-support"] }
