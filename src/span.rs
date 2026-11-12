@@ -32,10 +32,10 @@ impl Render for SpanScreen {
         let vp = window.viewport_size();
         let tile = self.app.read(cx).span_tile(self.monitor);
         let m = self.monitor;
-        let picture = tile.map(|(image, size, scaling)| {
-            let r = geometry::image_rect(f32::from(vp.width), f32::from(vp.height), size.0 as f32, size.1 as f32, scaling);
-            img(image).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill)
-        });
+        let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
+        let rect = tile.as_ref().map(|(_, size, scaling, pan)| geometry::image_rect_pan(vw, vh, size.0 as f32, size.1 as f32, *scaling, *pan));
+        let picture = tile.zip(rect).map(|((image, ..), r)| img(image).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill));
+        let bars = rect.map(|r| crate::view::pan_bars(vw, vh, r)).unwrap_or_default();
         div()
             .id("span-screen")
             .key_context("SeeMyMacSpan")
@@ -74,12 +74,17 @@ impl Render for SpanScreen {
                 this.app.update(cx, |app, _| app.pointer_at(Some(m), a, ev.position, None, None));
             }))
             .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, window, cx| {
-                let dy = match ev.delta {
-                    ScrollDelta::Pixels(p) => f32::from(p.y),
-                    ScrollDelta::Lines(l) => l.y,
+                let (dx, dy) = match ev.delta {
+                    ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+                    ScrollDelta::Lines(l) => (l.x * 40.0, l.y * 40.0),
                 };
                 let a = Self::area(window);
-                this.app.update(cx, |app, _| app.scroll_at(Some(m), a, ev.position, dy));
+                let shift = ev.modifiers.shift;
+                this.app.update(cx, |app, cx| {
+                    if app.scroll_wheel_at(Some(m), a, ev.position, dx, dy, shift) {
+                        cx.notify();
+                    }
+                });
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 let app = this.app.clone();
@@ -97,5 +102,6 @@ impl Render for SpanScreen {
                 let _ = this.main.update(cx, move |_, main, cx| app.update(cx, |a, cx| a.on_modifiers(&ev, main, cx)));
             }))
             .children(picture)
+            .children(bars)
     }
 }

@@ -88,6 +88,10 @@ pub struct Session {
     /// Where each monitor's picture sits in the remote framebuffer (monitor, x, y), for
     /// "Span all local monitors", which shows every monitor at once.
     origins: Vec<(usize, u16, u16)>,
+    /// How far a picture larger than the window is scrolled from centre, in screen pixels.
+    pub pan: (f32, f32),
+    /// The same for each monitor while spanning (each window scrolls on its own).
+    pub span_pans: Vec<(f32, f32)>,
     /// The connection's multi-monitor preference was applied (once per session).
     multi_applied: bool,
     /// The clipboard text both sides last agreed on (sent there or received from
@@ -212,6 +216,10 @@ pub struct App {
     /// "Span all local monitors" is showing: the main window shows remote monitor `span_main`
     /// and `span_windows` cover the other local displays.
     pub span: bool,
+    /// Direction the pointer is pushing against a window edge while zoomed in (-1, 0 or 1 each).
+    edge: (f32, f32),
+    /// Where the pointer last was: the monitor (when spanning) and the area of its window.
+    last_target: Option<(Option<usize>, Bounds<Pixels>)>,
     pub span_main: usize,
     /// The extra windows, when each opened and how many times it was asked to go full screen.
     span_windows: Vec<(AnyWindowHandle, Instant, u8)>,
@@ -296,6 +304,8 @@ impl App {
             shortcuts: None,
             local_display_ids: vec![],
             span: false,
+            edge: (0.0, 0.0),
+            last_target: None,
             span_main: 0,
             span_windows: vec![],
             span_opening: false,
@@ -362,6 +372,8 @@ impl App {
                 pointer_target: 0,
                 offset: (0, 0),
                 origins: vec![],
+                pan: (0.0, 0.0),
+                span_pans: vec![],
                 multi_applied: false,
                 clip_synced: None,
                 file_note: None,
@@ -1128,6 +1140,15 @@ impl App {
         cx.notify();
     }
 
+    pub fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.st.set_view(View::About);
+        self.field_cursor = None;
+        self.field_anchor = None;
+        self.field = Field::None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
     pub fn save_settings(&self) {
         if let Err(e) = self.settings.save() {
             log::error!("could not save settings: {e}");
@@ -1359,6 +1380,12 @@ impl App {
                 "pagedown" => self.set_monitor(&id, Mon::Two),
                 "home" => self.set_monitor(&id, Mon::All),
                 "v" => return self.use_virtual_display(cx),
+                k @ ("left" | "right" | "up" | "down") if self.pan_room() != (0.0, 0.0) => {
+                    // (While spanning, this scrolls the monitor the pointer was last on.)
+                    const STEP: f32 = 120.0;
+                    let (dx, dy) = match k { "left" => (STEP, 0.0), "right" => (-STEP, 0.0), "up" => (0.0, STEP), _ => (0.0, -STEP) };
+                    self.pan_by(dx, dy);
+                }
                 d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() && d != "0" => {
                     self.st.switch_to_index(d.parse().unwrap_or(0));
                 }
@@ -1504,7 +1531,11 @@ impl App {
         };
         let rel_x = f32::from(pos.x - area.origin.x);
         let rel_y = f32::from(pos.y - area.origin.y);
-        let xy = geometry::to_remote(f32::from(area.size.width), f32::from(area.size.height), tile.size.0, tile.size.1, s.scaling, rel_x, rel_y)?;
+        let pan = match mon {
+            Some(m) => s.span_pans.get(m).copied().unwrap_or_default(),
+            None => s.pan,
+        };
+        let xy = geometry::to_remote_pan(f32::from(area.size.width), f32::from(area.size.height), tile.size.0, tile.size.1, s.scaling, pan, rel_x, rel_y)?;
         let offset = match mon {
             Some(m) => s.origins.iter().find(|o| o.0 == m).map_or(s.offset, |o| (o.1, o.2)),
             None => s.offset,
@@ -1513,6 +1544,19 @@ impl App {
     }
 
     pub fn pointer_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>, buttons: Option<u8>, down: Option<bool>) {
+        self.last_target = Some((mon, area));
+        // Zoomed in: remember when the pointer is pushed against an edge, so the picture scrolls.
+        let (lx, ly) = self.pan_room_at(mon, area);
+        self.edge = (0.0, 0.0);
+        if self.settings.edge_scroll && self.buttons == 0 && (lx > 0.0 || ly > 0.0) {
+            const BAND: f32 = 6.0;
+            let (rx, ry) = (f32::from(pos.x - area.origin.x), f32::from(pos.y - area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            if rx >= 0.0 && ry >= 0.0 && rx <= w && ry <= h {
+                let dir = |v: f32, len: f32, room: f32| if room <= 0.0 { 0.0 } else if v < BAND { 1.0 } else if v > len - BAND { -1.0 } else { 0.0 };
+                self.edge = (dir(rx, w, lx), dir(ry, h, ly));
+            }
+        }
         // Explain dropped clicks (not moves, which are too frequent to log).
         let why = |reason: &str| {
             if buttons.is_some() {
@@ -1547,6 +1591,26 @@ impl App {
         self.send(Input::Pointer { x: x + ox, y: y + oy, buttons: b });
     }
 
+    /// Wheel or trackpad over the picture. A zoomed-in picture scrolls (Shift turns a plain
+    /// wheel sideways); otherwise the scroll goes to the remote.
+    pub fn scroll_wheel(&mut self, pos: Point<Pixels>, dx: f32, dy: f32, shift: bool) -> bool {
+        let mon = self.span.then_some(self.span_main);
+        let area = self.area.get();
+        self.scroll_wheel_at(mon, area, pos, dx, dy, shift)
+    }
+
+    pub fn scroll_wheel_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>, dx: f32, dy: f32, shift: bool) -> bool {
+        if self.st.view == View::Idle && self.pan_room_at(mon, area) != (0.0, 0.0) {
+            let (px, py) = if shift && dx == 0.0 { (dy, 0.0) } else { (dx, dy) };
+            if px != 0.0 || py != 0.0 {
+                self.pan_by_at(mon, area, px, py);
+                return true;
+            }
+        }
+        self.scroll_at(mon, area, pos, dy);
+        false
+    }
+
     pub fn scroll(&mut self, pos: Point<Pixels>, dy: f32) {
         let mon = self.span.then_some(self.span_main);
         let area = self.area.get();
@@ -1567,13 +1631,13 @@ impl App {
     }
 
     /// The picture of remote monitor `m` for a spanning window: image, size and scaling.
-    pub fn span_tile(&self, m: usize) -> Option<(Arc<RenderImage>, (u32, u32), Scaling)> {
+    pub fn span_tile(&self, m: usize) -> Option<(Arc<RenderImage>, (u32, u32), Scaling, (f32, f32))> {
         if !self.span {
             return None;
         }
         let s = self.active_session()?;
         let t = s.tiles.iter().find(|t| t.monitor == m)?;
-        Some((t.image.clone(), t.size, s.scaling))
+        Some((t.image.clone(), t.size, s.scaling, s.span_pans.get(m).copied().unwrap_or_default()))
     }
 
     /// Open or close the extra full-screen windows that "Span all local monitors" needs.
@@ -1677,8 +1741,57 @@ impl App {
         if let Some(id) = self.st.active.clone() {
             if let Some(s) = self.sessions.get_mut(&id) {
                 s.scaling = v;
+                s.pan = (0.0, 0.0);
+                s.span_pans.clear();
             }
         }
+    }
+
+    /// How far the picture shown in `area` can be scrolled (0, 0 when it fits or several monitors
+    /// are shown). `mon` is the remote monitor when spanning, else None.
+    fn pan_room_at(&self, mon: Option<usize>, area: Bounds<Pixels>) -> (f32, f32) {
+        let Some(s) = self.active_session() else { return (0.0, 0.0) };
+        let tile = match mon {
+            Some(m) => s.tiles.iter().find(|t| t.monitor == m),
+            None if s.tiles.len() > 1 && self.st.active.as_deref().map_or(false, |id| self.st.monitor(id) == Mon::All) => None,
+            None => s.tiles.first(),
+        };
+        let Some(t) = tile else { return (0.0, 0.0) };
+        geometry::pan_limits(f32::from(area.size.width), f32::from(area.size.height), t.size.0 as f32, t.size.1 as f32, s.scaling)
+    }
+
+    /// The same for the main window's own picture.
+    fn pan_room(&self) -> (f32, f32) {
+        self.pan_room_at(self.span.then_some(self.span_main), self.area.get())
+    }
+
+    /// Move a zoomed-in picture by (dx, dy) screen pixels; true if it moved.
+    pub fn pan_by_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, dx: f32, dy: f32) -> bool {
+        let (lx, ly) = self.pan_room_at(mon, area);
+        let Some(id) = self.st.active.clone() else { return false };
+        let Some(s) = self.sessions.get_mut(&id) else { return false };
+        let slot = match mon {
+            Some(m) => {
+                if s.span_pans.len() <= m {
+                    s.span_pans.resize(m + 1, (0.0, 0.0));
+                }
+                &mut s.span_pans[m]
+            }
+            None => &mut s.pan,
+        };
+        let new = ((slot.0 + dx).clamp(-lx, lx), (slot.1 + dy).clamp(-ly, ly));
+        let moved = new != *slot;
+        *slot = new;
+        moved
+    }
+
+    /// Scroll by the keyboard: the window the pointer was last in (the main one if unknown).
+    pub fn pan_by(&mut self, dx: f32, dy: f32) -> bool {
+        let (mon, area) = match self.last_target {
+            Some(t) if self.span => t,
+            _ => (self.span.then_some(self.span_main), self.area.get()),
+        };
+        self.pan_by_at(mon, area, dx, dy)
     }
 }
 

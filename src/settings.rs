@@ -37,6 +37,8 @@ pub struct Settings {
     pub command_key: CommandKey,
     /// Ask the desktop to pass its own shortcuts (Super, Super+Space, Alt+Tab…) to the Mac.
     pub capture_system_keys: bool,
+    /// While zoomed in, pushing the pointer against a window edge scrolls the picture that way.
+    pub edge_scroll: bool,
     /// Where files fetched from the Mac are saved (`~` is this user's home).
     pub download_dir: String,
     #[serde(skip)]
@@ -53,6 +55,7 @@ impl Default for Settings {
             max_reconnects: 5,
             command_key: CommandKey::SuperIsCommand,
             capture_system_keys: true,
+            edge_scroll: true,
             download_dir: "~/Downloads".into(),
             path: None,
         }

@@ -165,6 +165,12 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Settings, "Ctrl+, opens settings");
     cx.simulate_keystrokes("escape");
 
+    view.update_in(cx, |a, w, cx| a.open_about(w, cx));
+    draw(cx);
+    assert_eq!(view.read_with(cx, |a, _| a.st.view), View::About, "the About screen opens");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Idle, "Escape closes it");
+
     cx.simulate_keystrokes("ctrl-n");
     draw(cx);
     assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Dialog);

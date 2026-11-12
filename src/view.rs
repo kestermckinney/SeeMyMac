@@ -37,6 +37,25 @@ fn status_color(s: &Status) -> u32 {
     }
 }
 
+/// Thin scroll bars along the right and bottom edges, only while the picture `r` (placed in an
+/// `aw` x `ah` area) is larger than the area.
+pub(crate) fn pan_bars(aw: f32, ah: f32, r: geometry::Rect) -> Vec<Div> {
+    let bar = |track: f32, size: f32, pos: f32, horizontal: bool| {
+        let thumb = (track * track / size).max(24.0).min(track);
+        let at = (-pos / (size - track).max(1.0) * (track - thumb)).clamp(0.0, (track - thumb).max(0.0));
+        let b = div().absolute().rounded(px(2.0)).bg(rgba(0xFFFFFF66));
+        if horizontal { b.left(px(at)).bottom(px(2.0)).w(px(thumb)).h(px(4.0)) } else { b.top(px(at)).right(px(2.0)).h(px(thumb)).w(px(4.0)) }
+    };
+    let mut v = vec![];
+    if r.w > aw + 0.5 {
+        v.push(bar(aw, r.w, r.x, true));
+    }
+    if r.h > ah + 0.5 {
+        v.push(bar(ah, r.h, r.y, false));
+    }
+    v
+}
+
 pub(crate) fn dot(color: u32) -> Div {
     div().size(px(8.0)).rounded_full().bg(rgb(color)).flex_none()
 }
@@ -603,8 +622,8 @@ impl App {
                 if self.span && s.tiles.len() > 1 {
                     // "Span all local monitors": this window shows the monitor on its own display.
                     let t = s.tiles.iter().find(|t| t.monitor == self.span_main).unwrap_or(&s.tiles[0]);
-                    let r = geometry::image_rect(aw, ah, t.size.0 as f32, t.size.1 as f32, s.scaling);
-                    div().size_full().relative().overflow_hidden().bg(rgb(0x000000)).child(img(t.image.clone()).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill)).into_any_element()
+                    let r = geometry::image_rect_pan(aw, ah, t.size.0 as f32, t.size.1 as f32, s.scaling, s.span_pans.get(t.monitor).copied().unwrap_or_default());
+                    div().size_full().relative().overflow_hidden().bg(rgb(0x000000)).child(img(t.image.clone()).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill)).children(pan_bars(aw, ah, r)).into_any_element()
                 } else if mon == Mon::All && s.tiles.len() > 1 {
                     // Monitors side by side at 16:9 on a dark letterbox, each labelled (§5).
                     let n = s.tiles.len() as f32;
@@ -642,13 +661,14 @@ impl App {
                     row.into_any_element()
                 } else {
                     let t = &s.tiles[0];
-                    let r = geometry::image_rect(aw, ah, t.size.0 as f32, t.size.1 as f32, s.scaling);
+                    let r = geometry::image_rect_pan(aw, ah, t.size.0 as f32, t.size.1 as f32, s.scaling, s.pan);
                     div()
                         .size_full()
                         .relative()
                         .overflow_hidden()
                         .bg(rgb(0x000000))
                         .child(img(t.image.clone()).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill))
+                        .children(pan_bars(aw, ah, r))
                         .into_any_element()
                 }
             }
@@ -812,6 +832,7 @@ impl App {
             .child(action("act-manage", "Manage all connections…", "Ctrl+M").on_click(cx.listener(|this, _, window, cx| this.open_manage(window, cx))))
             .child(action("act-getfile", "Get file from Mac…", "").on_click(cx.listener(|this, _, window, cx| this.open_get_file(window, cx))))
             .child(action("act-settings", "Settings", "Ctrl+,").on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))))
+            .child(action("act-about", "About...", "").on_click(cx.listener(|this, _, window, cx| this.open_about(window, cx))))
             .child(div().h(px(1.0)).bg(rgb(DIVIDER)))
             .child(row_base(ElementId::from("act-exit"))
                 .debug_selector(|| "act-exit".into())
@@ -1190,12 +1211,22 @@ impl Render for App {
             .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| this.pointer(ev.position, Some(4), Some(false))))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| this.pointer(ev.position, None, None)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.drop_files(paths.paths().to_vec(), cx)))
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, _| {
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                 let dy = match ev.delta {
                     ScrollDelta::Pixels(p) => f32::from(p.y),
                     ScrollDelta::Lines(l) => l.y,
                 };
-                this.scroll(ev.position, dy);
+                let dx = match ev.delta {
+                    ScrollDelta::Pixels(p) => f32::from(p.x),
+                    ScrollDelta::Lines(l) => l.x * 40.0,
+                };
+                let dy = match ev.delta {
+                    ScrollDelta::Pixels(_) => dy,
+                    ScrollDelta::Lines(_) => dy * 40.0,
+                };
+                if this.scroll_wheel(ev.position, dx, dy, ev.modifiers.shift) {
+                    cx.notify();
+                }
             }))
             .child(content)
             .when(!self.st.pinned, |d| d.child(self.pull_tab(cx)))
@@ -1213,6 +1244,7 @@ impl Render for App {
             .when(view == View::Dialog, |d| d.child(self.dialog(cx)))
             .when(view == View::Manage, |d| d.child(self.manage_panel(cx)))
             .when(view == View::Settings, |d| d.child(self.settings_panel(cx)))
+            .when(view == View::About, |d| d.child(self.about_panel(cx)))
             .when(view == View::Password, |d| d.child(self.password_prompt(cx)))
             .when(view == View::GetFile, |d| d.child(self.get_file_prompt(cx)));
 
@@ -1241,7 +1273,7 @@ impl Render for App {
 }
 
 /// The application icon, decoded once from the embedded PNG (as premultiplied BGRA).
-fn app_icon() -> Option<std::sync::Arc<RenderImage>> {
+pub(crate) fn app_icon() -> Option<std::sync::Arc<RenderImage>> {
     static ICON: std::sync::OnceLock<Option<std::sync::Arc<RenderImage>>> = std::sync::OnceLock::new();
     ICON.get_or_init(|| {
         let mut buf = image::load_from_memory_with_format(include_bytes!("../assets/icons/seemac.png"), image::ImageFormat::Png).ok()?.into_rgba8();

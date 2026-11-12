@@ -244,6 +244,10 @@ impl App {
                     "System shortcuts",
                     self.settings_cycle("s-syskeys", &[true, false], st.capture_system_keys, |on| if on { "Send to the Mac (Super, Super+Space, Alt+Tab…)".into() } else { "Keep for this PC".into() }, |s, v| s.capture_system_keys = v, cx),
                 ))
+                .child(form_row(
+                    "Zoomed in",
+                    self.settings_cycle("s-edge", &[true, false], st.edge_scroll, |on| if on { "Scroll when the pointer touches a window edge".into() } else { "Scroll with the wheel or Ctrl+Alt+arrows only".into() }, |s, v| s.edge_scroll = v, cx),
+                ))
                 .child(div().pb(px(6.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("GNOME asks once whether to allow this. Super+Escape gives the shortcuts back to this PC until you click the session again."))
                 .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Keyboard shortcuts"))
                 .children(
@@ -252,6 +256,7 @@ impl App {
                         ("Ctrl+Alt+1 … 9", "Go to session"),
                         ("Ctrl+Alt+PgUp / PgDn / Home", "Monitor 1 / 2 / Both"),
                         ("Ctrl+Alt+Enter", "Full screen"),
+                        ("Ctrl+Alt+Arrows", "Scroll a zoomed-in picture"),
                         ("Ctrl+Alt+V", "Apple HP: use the virtual display"),
                         ("Ctrl+N", "New connection"),
                         ("Ctrl+M", "Manage all connections"),
@@ -287,5 +292,49 @@ impl App {
             .child(primary_btn("settings-close", "Done").on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx))))
             .into_any_element();
         self.modal("settings-scrim", "settings", 640.0, "Settings", Some(tabs), div().w_full().min_h(px(400.0)).child(body).into_any_element(), footer, cx)
+    }
+
+    // ----- about ----------------------------------------------------------------
+
+    pub(crate) fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let link = |id: &'static str, text: &'static str, url: &'static str, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_color(rgb(ACCENT))
+                .hover(|s| s.underline())
+                .child(text)
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(url)))
+        };
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .py(px(8.0))
+            .children(app_icon().map(|i| img(i).w(px(96.0)).h(px(96.0)).object_fit(ObjectFit::Contain)))
+            .child(div().mt(px(6.0)).text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).child("SeeMyMac"))
+            .child(div().text_color(rgb(MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))
+            .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(format!("Built {}", env!("SEEMYMAC_BUILD_TIME"))))
+            .child(div().mt(px(8.0)).child(link("about-gitlab", "gitlab.com/kestermckinney/SeeMyMac", "https://gitlab.com/kestermckinney/SeeMyMac", cx)))
+            .child(div().w_full().h(px(1.0)).bg(rgb(DIVIDER)).my(px(10.0)))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Project managers: meet Project Notes"))
+            .child(
+                div()
+                    .max_w(px(380.0))
+                    .text_align(TextAlign::Center)
+                    .text_color(rgb(MUTED))
+                    .child("Keep project notes, action items and status reports in one place so nothing slips. Try Project Notes, our project notes and action items software, free."),
+            )
+            .child(link("about-pnp", "www.projectnotespro.com", "https://www.projectnotespro.com", cx))
+            .into_any_element();
+        let footer = div()
+            .flex()
+            .w_full()
+            .child(div().flex_1())
+            .child(primary_btn("about-close", "Close").on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx))))
+            .into_any_element();
+        self.modal("about-scrim", "about", 460.0, "About SeeMyMac", None, body, footer, cx)
     }
 }

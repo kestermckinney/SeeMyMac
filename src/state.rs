@@ -14,6 +14,8 @@ pub enum View {
     Manage,
     /// Application settings.
     Settings,
+    /// The About screen: icon, version, build time and links.
+    About,
     /// Asks for a password when a connection uses "Ask when connecting".
     Password,
     /// Asks for the path of a file or folder on the Mac to copy here.
