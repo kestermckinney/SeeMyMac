@@ -1,8 +1,10 @@
 param(
-    [ValidateSet('arm64', 'x86', 'all')]
-    [string]$Architecture = 'all',
     [switch]$Debug
 )
+
+# Builds SeeMyMac for ARM64 and 32-bit x86 Windows and packs both into one Inno Setup
+# installer (target\installers\SeeMyMac-<version>-setup.exe) that installs the build matching
+# the PC's processor. The in-app updater downloads this same file.
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -25,22 +27,23 @@ if (Test-Path $llvm) { $env:Path = "$llvm;$env:Path" }
 $metadata = & $cargo metadata --manifest-path (Join-Path $root 'Cargo.toml') --locked --no-deps --format-version 1 | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
 $version = ($metadata.packages | Where-Object { $_.name -eq 'see_my_mac' } | Select-Object -First 1).version
-$targets = @{ arm64 = 'aarch64-pc-windows-msvc'; x86 = 'i686-pc-windows-msvc' }
-$arches = if ($Architecture -eq 'all') { @('arm64', 'x86') } else { @($Architecture) }
+$targets = [ordered]@{ arm64 = 'aarch64-pc-windows-msvc'; x86 = 'i686-pc-windows-msvc' }
 $profile = if ($Debug) { 'debug' } else { 'release' }
+$binaries = @{}
 Push-Location $root
 try {
-    foreach ($arch in $arches) {
+    foreach ($arch in $targets.Keys) {
         $target = $targets[$arch]
         & $rustup target add $target
         if ($LASTEXITCODE -ne 0) { throw "Could not install $target." }
-        $args = @('build', '--locked', '--bin', 'see_my_mac', '--target', $target)
-        if (-not $Debug) { $args += '--release' }
-        & $cargo @args
+        $cargoArgs = @('build', '--locked', '--bin', 'see_my_mac', '--target', $target)
+        if (-not $Debug) { $cargoArgs += '--release' }
+        & $cargo @cargoArgs
         if ($LASTEXITCODE -ne 0) { throw "Build failed for $target." }
-        $binary = Join-Path $metadata.target_directory "$target\$profile\see_my_mac.exe"
-        $suffix = if ($Debug) { '-debug' } else { '' }
-        & $iscc "/DAppVersion=$version" "/DAppArch=$arch" "/DAppBinary=$binary" "/DBuildSuffix=$suffix" (Join-Path $root 'packaging\windows\seemymac.iss')
-        if ($LASTEXITCODE -ne 0) { throw "Installer creation failed for $arch." }
+        $binaries[$arch] = Join-Path $metadata.target_directory "$target\$profile\see_my_mac.exe"
+        if (-not (Test-Path $binaries[$arch])) { throw "Missing $($binaries[$arch])." }
     }
+    $suffix = if ($Debug) { '-debug' } else { '' }
+    & $iscc "/DAppVersion=$version" "/DBinaryArm64=$($binaries.arm64)" "/DBinaryX86=$($binaries.x86)" "/DBuildSuffix=$suffix" (Join-Path $root 'packaging\windows\seemymac.iss')
+    if ($LASTEXITCODE -ne 0) { throw 'Installer creation failed.' }
 } finally { Pop-Location }

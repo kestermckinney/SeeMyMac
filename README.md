@@ -6,10 +6,7 @@ SeeMyMac is a cross-platform screen sharing application built with Rust and GPUI
 
 ### Windows
 
-Choose the installer for your PC's processor. In Windows, open **Settings → System → About** and check **System type**.
-
-- **ARM64:** use `SeeMyMac-<version>-arm64-setup.exe` on an ARM-based PC.
-- **x86:** use `SeeMyMac-<version>-x86-setup.exe` for the 32-bit Windows build; it can also run on compatible 64-bit Windows PCs.
+Download `SeeMyMac-<version>-setup.exe`. The one installer works on every Windows PC: it installs the native ARM64 build on ARM-based PCs and the 32-bit x86 build on Intel and AMD PCs.
 
 Run the installer, follow the prompts, and open **SeeMyMac** from the Start menu. The installers are unsigned. A Windows installer is not currently published by the release pipeline; to create one locally, follow the [Windows build instructions](#building) below. Debug installers have `-debug-setup.exe` in their names.
 
@@ -240,9 +237,10 @@ target tools and Windows SDK). Then run:
 powershell -ExecutionPolicy Bypass -File .\tools\build-installers.ps1
 ```
 
-This produces separate ARM64 and 32-bit x86 release installers in
-`target\installers`. Use `-Architecture arm64` or `-Architecture x86` to build
-one, or add `-Debug` for debug builds. The installers are unsigned; signing is
+This builds SeeMyMac for ARM64 and 32-bit x86 and packs both into one installer,
+`target\installers\SeeMyMac-<version>-setup.exe`, which installs the build that
+matches the PC's processor. Add `-Debug` for a debug installer
+(`-debug-setup.exe`). The installers are unsigned; signing is
 needed before distribution if trusted publisher verification is desired.
 
 Windows uses Credential Manager for saved passwords and Explorer for fetched

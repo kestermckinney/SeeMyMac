@@ -50,13 +50,13 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 /// Whether `name` is this platform's installer, given the file names of the release's links.
-/// Windows: `SeeMyMac-<ver>-<arch>-setup.exe` (arm64 or x86; debug builds are never offered).
+/// Windows: `SeeMyMac-<ver>-setup.exe`, one installer that picks the ARM64 or x86 build for
+/// the PC it runs on (debug installers, `-debug-setup.exe`, are never offered).
 /// macOS: `SeeMyMac-<ver>-macOS.zip` (a universal, signed and notarized app bundle).
 fn is_platform_asset(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     if cfg!(target_os = "windows") {
-        let arch = if cfg!(target_arch = "aarch64") { "-arm64-setup.exe" } else { "-x86-setup.exe" };
-        n.starts_with("seemymac-") && n.ends_with(arch) && !n.contains("-debug-")
+        n.strip_prefix("seemymac-").and_then(|r| r.strip_suffix("-setup.exe")).map_or(false, |v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
     } else if cfg!(target_os = "macos") {
         n.starts_with("seemymac-") && n.contains("macos") && n.ends_with(".zip")
     } else {
@@ -297,13 +297,14 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_picks_its_architecture_and_never_debug() {
-        let want = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86" };
-        let links = format!(r#"{{"name":"d","direct_asset_url":"https://x/SeeMyMac-0.2.0-{want}-debug-setup.exe"}},{{"name":"o","direct_asset_url":"https://x/SeeMyMac-0.2.0-other-setup.exe"}},{{"name":"r","direct_asset_url":"https://x/SeeMyMac-0.2.0-{want}-setup.exe"}}"#);
-        match parse_release(&release("v0.2.0", &links, false), "0.1.4") {
-            CheckResult::Available(r) => assert!(r.asset_url.ends_with(&format!("-{want}-setup.exe"))),
+    fn windows_picks_the_combined_installer_and_never_debug() {
+        let links = r#"{"name":"d","direct_asset_url":"https://x/SeeMyMac-0.2.0-debug-setup.exe"},{"name":"o","direct_asset_url":"https://x/SeeMyMac-0.2.0-other-setup.exe"},{"name":"h","direct_asset_url":"http://x/SeeMyMac-0.2.0-setup.exe"},{"name":"r","direct_asset_url":"https://x/SeeMyMac-0.2.0-setup.exe"}"#;
+        match parse_release(&release("v0.2.0", links, false), "0.1.4") {
+            CheckResult::Available(r) => assert_eq!((r.asset_url.as_str(), r.asset_name.as_str()), ("https://x/SeeMyMac-0.2.0-setup.exe", "SeeMyMac-0.2.0-setup.exe")),
             other => panic!("{other:?}"),
         }
+        let only_debug = r#"{"name":"d","direct_asset_url":"https://x/SeeMyMac-0.2.0-debug-setup.exe"}"#;
+        assert!(matches!(parse_release(&release("v0.2.0", only_debug, false), "0.1.4"), CheckResult::Manual(_)));
     }
 
     #[cfg(target_os = "linux")]

@@ -1,11 +1,13 @@
 #ifndef AppVersion
   #error AppVersion must be supplied
 #endif
-#ifndef AppArch
-  #error AppArch must be supplied
+; One installer for every Windows PC: it carries the ARM64 and the 32-bit x86 builds and
+; installs the one that suits the processor (x86 also covers 64-bit Intel/AMD PCs).
+#ifndef BinaryArm64
+  #error BinaryArm64 (the aarch64-pc-windows-msvc see_my_mac.exe) must be supplied
 #endif
-#ifndef AppBinary
-  #error AppBinary must be supplied
+#ifndef BinaryX86
+  #error BinaryX86 (the i686-pc-windows-msvc see_my_mac.exe) must be supplied
 #endif
 #ifndef BuildSuffix
   #define BuildSuffix ""
@@ -19,19 +21,19 @@ DefaultDirName={autopf}\SeeMyMac
 DefaultGroupName=SeeMyMac
 PrivilegesRequired=lowest
 OutputDir=..\..\target\installers
-OutputBaseFilename=SeeMyMac-{#AppVersion}-{#AppArch}{#BuildSuffix}-setup
+OutputBaseFilename=SeeMyMac-{#AppVersion}{#BuildSuffix}-setup
 SetupIconFile=..\..\assets\icons\seemac.ico
 UninstallDisplayIcon={app}\see_my_mac.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-#if AppArch == "arm64"
-ArchitecturesAllowed=arm64
+; x86compatible: any PC that runs x86 programs (x86, x64 and ARM64 Windows).
+ArchitecturesAllowed=x86compatible
 ArchitecturesInstallIn64BitMode=arm64
-#endif
 
 [Files]
-Source: "{#AppBinary}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinaryArm64}"; DestDir: "{app}"; DestName: "see_my_mac.exe"; Check: IsArm64; Flags: ignoreversion
+Source: "{#BinaryX86}"; DestDir: "{app}"; DestName: "see_my_mac.exe"; Check: not IsArm64; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

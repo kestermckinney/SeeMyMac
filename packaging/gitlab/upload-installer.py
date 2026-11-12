@@ -3,14 +3,14 @@
 
   GITLAB_TOKEN=<personal access token with api scope> \\
     packaging/gitlab/upload-installer.py v0.2.0 target/macos/SeeMyMac-0.2.0-macOS.zip \\
-    target/macos/SeeMyMac-0.2.0-macOS.dmg target/installers/SeeMyMac-0.2.0-arm64-setup.exe ...
+    target/macos/SeeMyMac-0.2.0-macOS.dmg target/installers/SeeMyMac-0.2.0-setup.exe
 
 Each file is uploaded to the project's generic package registry and linked from the release
 (replacing a link of the same name). The release must already exist; the tag pipeline creates it
 (as an upcoming release) and the manual "publish-release" job publishes it. Upload the Windows
-installer(s) and the macOS zip before publishing: src/update.rs picks them by file name:
-  SeeMyMac-<version>-arm64-setup.exe, SeeMyMac-<version>-x86-setup.exe  (Windows)
-  SeeMyMac-<version>-macOS.zip                                          (macOS, signed and notarized)
+installer and the macOS zip before publishing: src/update.rs picks them by file name:
+  SeeMyMac-<version>-setup.exe  (Windows; one installer for ARM64 and x86 PCs)
+  SeeMyMac-<version>-macOS.zip  (macOS, signed and notarized)
 """
 import json
 import os
