@@ -1,3 +1,7 @@
+// Release builds on Windows are GUI-subsystem apps so no console window opens with them.
+// Debug builds keep the console for log output.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use gpui::{prelude::*, px, size, Application, Bounds, SharedString, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions};
 use see_my_mac::{app::App, model::Store, settings::Settings};
 
