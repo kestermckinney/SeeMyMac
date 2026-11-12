@@ -72,6 +72,8 @@ windows = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# Real display positions (gpui reports every display at 0, 0 on macOS).
+core-graphics = "0.24"
 
 [profile.dev.package."*"]
 # Every dependency optimised, without debug assertions or overflow checks, even

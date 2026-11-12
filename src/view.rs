@@ -600,7 +600,12 @@ impl App {
 
         match &s.status {
             Status::Connected if !s.tiles.is_empty() => {
-                if mon == Mon::All && s.tiles.len() > 1 {
+                if self.span && s.tiles.len() > 1 {
+                    // "Span all local monitors": this window shows the monitor on its own display.
+                    let t = s.tiles.iter().find(|t| t.monitor == self.span_main).unwrap_or(&s.tiles[0]);
+                    let r = geometry::image_rect(aw, ah, t.size.0 as f32, t.size.1 as f32, s.scaling);
+                    div().size_full().relative().overflow_hidden().bg(rgb(0x000000)).child(img(t.image.clone()).absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).object_fit(ObjectFit::Fill)).into_any_element()
+                } else if mon == Mon::All && s.tiles.len() > 1 {
                     // Monitors side by side at 16:9 on a dark letterbox, each labelled (§5).
                     let n = s.tiles.len() as f32;
                     let tile_w = ((aw - 16.0 - 8.0 * (n - 1.0)) / n).max(1.0);

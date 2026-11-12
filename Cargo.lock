@@ -6403,6 +6403,7 @@ dependencies = [
  "aes 0.8.4",
  "anyhow",
  "async-channel 2.5.0",
+ "core-graphics 0.24.0",
  "des 0.8.1",
  "dirs 5.0.1",
  "env_logger",
