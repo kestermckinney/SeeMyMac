@@ -1,31 +1,122 @@
 {
-	"folders": [
-		{
-			"path": ".",
-			"file_exclude_patterns": ["*.sublime-workspace", ".gitignore"],
-			"folder_exclude_patterns": ["target", ".venv", ".*", "graphify-out"],
-			"binary_file_patterns": ["*.png", "*.jpg", "*.ico", "*.zip", "*.so", "*.a", "*.o", "*.rlib"],
-			"index_exclude_patterns": ["target/*", ".venv/*"]
-		}
-	],
-	"build_systems": [
-		{
-			"name": "SeeMyMac",
-			"selector": "source.rust",
-			"working_dir": "$project_path",
-			"file_regex": "^\\s*--> (..[^:]*):([0-9]+):?([0-9]+)?",
-			"shell_cmd": "cargo build --bin see_my_mac",
-			"variants": [
-				{ "name": "Build Debug", "shell_cmd": "cargo build --bin see_my_mac" },
-				{ "name": "Build Release", "shell_cmd": "cargo build --release --bin see_my_mac" },
-				{ "name": "Build & Run Debug", "shell_cmd": "cargo run --bin see_my_mac" },
-				{ "name": "Build & Run Release", "shell_cmd": "cargo run --release --bin see_my_mac" },
-				{ "name": "Check", "shell_cmd": "cargo check --all-targets" },
-				{ "name": "Test", "shell_cmd": "cargo test" },
-				{ "name": "Clippy", "shell_cmd": "cargo clippy --all-targets" },
-				{ "name": "Clean", "shell_cmd": "cargo clean" },
-				{ "name": "Build UI Driver", "shell_cmd": "cargo build --bin ui_driver" }
-			]
-		}
-	]
+    "folders":  [
+                    {
+                        "path":  ".",
+                        "file_exclude_patterns":  [
+                                                      "*.sublime-workspace",
+                                                      ".gitignore"
+                                                  ],
+                        "folder_exclude_patterns":  [
+                                                        "target",
+                                                        ".venv",
+                                                        ".*",
+                                                        "graphify-out"
+                                                    ],
+                        "binary_file_patterns":  [
+                                                     "*.png",
+                                                     "*.jpg",
+                                                     "*.ico",
+                                                     "*.zip",
+                                                     "*.so",
+                                                     "*.a",
+                                                     "*.o",
+                                                     "*.rlib"
+                                                 ],
+                        "index_exclude_patterns":  [
+                                                       "target/*",
+                                                       ".venv/*"
+                                                   ]
+                    }
+                ],
+    "build_systems":  [
+                          {
+                              "name":  "SeeMyMac - Debug x86",
+                              "selector":  "source.rust",
+                              "working_dir":  "$project_path",
+                              "file_regex":  "^\\s*--\u003e (..[^:]*):([0-9]+):?([0-9]+)?",
+                              "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture x86",
+                              "variants":  [
+                                               {
+                                                   "name":  "Build \u0026 Run Debug x86",
+                                                   "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture x86 -Run"
+                                               }
+                                           ]
+                          },
+                          {
+                              "name":  "SeeMyMac - Release x86",
+                              "selector":  "source.rust",
+                              "working_dir":  "$project_path",
+                              "file_regex":  "^\\s*--\u003e (..[^:]*):([0-9]+):?([0-9]+)?",
+                              "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture x86 -Release",
+                              "variants":  [
+                                               {
+                                                   "name":  "Build \u0026 Run Release x86",
+                                                   "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture x86 -Release -Run"
+                                               }
+                                           ]
+                          },
+                          {
+                              "name":  "SeeMyMac - Debug ARM64",
+                              "selector":  "source.rust",
+                              "working_dir":  "$project_path",
+                              "file_regex":  "^\\s*--\u003e (..[^:]*):([0-9]+):?([0-9]+)?",
+                              "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture arm64",
+                              "variants":  [
+                                               {
+                                                   "name":  "Build \u0026 Run Debug ARM64",
+                                                   "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture arm64 -Run"
+                                               }
+                                           ]
+                          },
+                          {
+                              "name":  "SeeMyMac - Release ARM64",
+                              "selector":  "source.rust",
+                              "working_dir":  "$project_path",
+                              "file_regex":  "^\\s*--\u003e (..[^:]*):([0-9]+):?([0-9]+)?",
+                              "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture arm64 -Release",
+                              "variants":  [
+                                               {
+                                                   "name":  "Build \u0026 Run Release ARM64",
+                                                   "shell_cmd":  "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Architecture arm64 -Release -Run"
+                                               }
+                                           ]
+                          },
+                          {
+                              "name":  "SeeMyMac - Utilities",
+                              "selector":  "source.rust",
+                              "working_dir":  "$project_path",
+                              "file_regex":  "^\\s*--\u003e (..[^:]*):([0-9]+):?([0-9]+)?",
+                              "shell_cmd":  "cargo build --bin see_my_mac",
+                              "variants":  [
+                                               {
+                                                   "name":  "Build \u0026 Run Debug",
+                                                   "shell_cmd":  "cargo run --bin see_my_mac"
+                                               },
+                                               {
+                                                   "name":  "Build \u0026 Run Release",
+                                                   "shell_cmd":  "cargo run --release --bin see_my_mac"
+                                               },
+                                               {
+                                                   "name":  "Check",
+                                                   "shell_cmd":  "cargo check --all-targets"
+                                               },
+                                               {
+                                                   "name":  "Test",
+                                                   "shell_cmd":  "cargo test"
+                                               },
+                                               {
+                                                   "name":  "Clippy",
+                                                   "shell_cmd":  "cargo clippy --all-targets"
+                                               },
+                                               {
+                                                   "name":  "Clean",
+                                                   "shell_cmd":  "cargo clean"
+                                               },
+                                               {
+                                                   "name":  "Build UI Driver",
+                                                   "shell_cmd":  "cargo build --bin ui_driver"
+                                               }
+                                           ]
+                          }
+                      ]
 }
