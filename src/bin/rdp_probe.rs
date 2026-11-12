@@ -84,7 +84,10 @@ fn main() {
     let end = t0 + Duration::from_secs(secs);
     // SEEMYMAC_PROBE_NO_INPUT=1 only watches: no clicks, keys, clipboard or resize (for live sessions).
     let watch_only = std::env::var_os("SEEMYMAC_PROBE_NO_INPUT").is_some();
-    let (mut connected, mut sent, mut first_frame, mut resized, mut asked) = (false, watch_only, None, false, watch_only);
+    // SEEMYMAC_PROBE_RESIZE=WxH asks for that desktop size even when only watching (resizes the live session).
+    let resize_to: (u32, u32) = std::env::var("SEEMYMAC_PROBE_RESIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))).unwrap_or((800, 600));
+    let ask_resize = !watch_only || std::env::var_os("SEEMYMAC_PROBE_RESIZE").is_some();
+    let (mut connected, mut sent, mut first_frame, mut resized, mut asked) = (false, watch_only, None, false, !ask_resize);
     let mut disconnected = None;
     while Instant::now() < end && disconnected.is_none() {
         while let Ok(ev) = h.events.try_recv() {
@@ -131,13 +134,13 @@ fn main() {
         if let (Some(t), true, false) = (first_frame, sent, asked) {
             if t.elapsed() > Duration::from_millis(2000) {
                 asked = true;
-                h.send(Input::UseVirtualDisplay { width: 800, height: 600 });
-                println!("[{:>5} ms] asked for a resize to 800x600", t0.elapsed().as_millis());
+                h.send(Input::UseVirtualDisplay { width: resize_to.0, height: resize_to.1 });
+                println!("[{:>5} ms] asked for a resize to {}x{}", t0.elapsed().as_millis(), resize_to.0, resize_to.1);
             }
         }
-        if sent && !resized {
+        if asked && !resized {
             let f = h.fb.lock().unwrap();
-            if (f.width, f.height) == (800, 600) {
+            if (f.width, f.height) == resize_to {
                 resized = true;
                 println!("[{:>5} ms] RESIZED to {}x{}", t0.elapsed().as_millis(), f.width, f.height);
             }

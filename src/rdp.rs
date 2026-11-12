@@ -689,63 +689,30 @@ fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, i
                     _ => {}
                 }
             }
-            if let Some((gw, gh)) = paint_gfx(&mut stage_, fb, (w, h)) {
-                // The server resized the graphics output (ResetGraphics).
-                (w, h) = (gw, gh);
-                image = DecodedImage::new(PixelFormat::BgrA32, gw as u16, gh as u16);
-                dirty = None;
+            // The session composites the graphics pipeline into `image` and follows its
+            // ResetGraphics by resizing it (a desktop resize, with RDPGFX): resize the framebuffer
+            // too, or every later update is held back as "a resize in flight".
+            let (iw, ih) = (u32::from(image.width()), u32::from(image.height()));
+            if (iw, ih) != (w, h) && iw > 0 && ih > 0 {
+                log::debug!("{}: graphics output resized to {iw}x{ih}", cfg.host);
+                (w, h) = (iw, ih);
+                let mut f = fb.lock().unwrap();
+                f.resize(w, h);
+                f.screens.retain(|s| s.x + s.w <= w && s.y + s.h <= h);
+                drop(f);
+                dirty = Some(Rect { l: 0, t: 0, r: w - 1, b: h - 1 });
+                publish(&image, fb, &mut dirty, &mut last_publish, true);
             }
             publish(&image, fb, &mut dirty, &mut last_publish, false);
         }
     }
 }
 
-/// Graphics pipeline events need no handling here: the client composites surfaces itself and
-/// [`paint_gfx`] drains the finished picture.
+/// Graphics pipeline events need no handling here: the session composites the surfaces into
+/// its image itself.
 struct Gfx;
 
 impl GraphicsPipelineHandler for Gfx {}
-
-/// Copies what the graphics pipeline finished painting into the framebuffer. Returns the new
-/// output size when the server resized it.
-fn paint_gfx(stage_: &mut ActiveStage, fb: &Arc<Mutex<Framebuffer>>, (w, h): (u32, u32)) -> Option<(u32, u32)> {
-    let mut gfx = stage_.get_svc_processor_mut::<DrdynvcClient>()?.get_dvc_mut::<GraphicsPipelineClient>()?;
-    let gfx = gfx.processor_mut();
-    let reset = gfx.take_output_reset().map(|(a, b)| (u32::from(a), u32::from(b))).filter(|&s| s != (w, h));
-    let updates = gfx.drain_output();
-    if reset.is_none() && updates.is_empty() {
-        return None;
-    }
-    let mut f = fb.lock().unwrap();
-    if let Some((nw, nh)) = reset {
-        f.resize(nw, nh);
-        f.bgra = vec![0; (nw * nh * 4) as usize];
-        f.screens.clear();
-    }
-    let (fw, fh) = (f.width as usize, f.height as usize);
-    for u in updates {
-        let (l, t) = (usize::from(u.region.left), usize::from(u.region.top));
-        let (uw, uh) = (usize::from(u.region.right).saturating_sub(l), usize::from(u.region.bottom).saturating_sub(t));
-        if uw == 0 || u.data.len() < uw * uh * 4 {
-            continue;
-        }
-        for (row, src) in u.data.chunks_exact(uw * 4).take(uh).enumerate() {
-            let y = t + row;
-            if y >= fh || l >= fw {
-                break;
-            }
-            let n = uw.min(fw - l);
-            let dst = &mut f.bgra[(y * fw + l) * 4..(y * fw + l + n) * 4];
-            // RGBA from the pipeline; the framebuffer is opaque BGRA.
-            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
-            }
-        }
-    }
-    f.version += 1;
-    f.wake();
-    reset
-}
 
 // ----- server redirection -----------------------------------------------------------
 
