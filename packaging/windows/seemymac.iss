@@ -39,3 +39,39 @@ Name: "{autoprograms}\SeeMyMac"; Filename: "{app}\see_my_mac.exe"
 
 [Run]
 Filename: "{app}\see_my_mac.exe"; Description: "Launch SeeMyMac"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\see_my_mac.exe"; Flags: nowait; Check: ShouldRelaunch
+
+[Code]
+// The in-app updater runs this installer as: /VERYSILENT /relaunch=1 /waitpid=<its process id>.
+// Setup waits for that process to exit (the program file is locked while it runs), installs over
+// the existing copy in the user's profile (PrivilegesRequired=lowest, so no elevation prompt),
+// and starts SeeMyMac again.
+function OpenProcess(dwDesiredAccess: DWORD; bInheritHandle: BOOL; dwProcessId: DWORD): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(hHandle: THandle; dwMilliseconds: DWORD): DWORD;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(hObject: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function InitializeSetup(): Boolean;
+var
+  Pid: Integer;
+  Handle: THandle;
+begin
+  Result := True;
+  Pid := StrToIntDef(ExpandConstant('{param:waitpid|0}'), 0);
+  if Pid > 0 then
+  begin
+    Handle := OpenProcess($00100000, False, Pid); // SYNCHRONIZE
+    if Handle <> 0 then
+    begin
+      WaitForSingleObject(Handle, 30000);
+      CloseHandle(Handle);
+    end;
+  end;
+end;
+
+function ShouldRelaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

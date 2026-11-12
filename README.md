@@ -13,6 +13,10 @@ Choose the installer for your PC's processor. In Windows, open **Settings → Sy
 
 Run the installer, follow the prompts, and open **SeeMyMac** from the Start menu. The installers are unsigned. A Windows installer is not currently published by the release pipeline; to create one locally, follow the [Windows build instructions](#building) below. Debug installers have `-debug-setup.exe` in their names.
 
+### macOS
+
+Use `SeeMyMac-<version>-macOS.dmg` (or the `.zip`): drag **SeeMyMac** into the Applications folder inside your own home folder (`~/Applications`; create it if it is not there). The app is signed and notarized, and it lives in your user profile, so it updates itself without asking for a password. To build, sign and notarize it yourself, see `packaging/macos/build_app.sh`.
+
 ### Linux
 
 Install [Flatpak](https://flatpak.org/setup/) for your distribution, then add the SeeMyMac repository and install the app:
@@ -28,7 +32,11 @@ Open SeeMyMac from your applications menu, or run:
 flatpak run io.gitlab.kestermckinney.SeeMyMac
 ```
 
-Run `flatpak update` to install updates. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
+Run `flatpak update` to install updates.
+
+### Updates
+
+On Windows and macOS SeeMyMac checks GitLab for a newer release when it starts (at most once a day; switch this off in Settings → General → Updates) and asks whether to download and install it. **About… → Check for updates** looks on demand. The installer replaces the copy in your user profile and SeeMyMac restarts by itself. Releases need the Windows installers and the macOS zip attached before they are published: build them locally and attach them with `packaging/gitlab/upload-installer.py`. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
 
 ## UI Driver Tool
 

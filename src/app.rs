@@ -37,6 +37,28 @@ impl Status {
     }
 }
 
+/// Where a software update stands (see `update.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(crate::update::Release),
+    Downloading { received: u64, total: Option<u64> },
+    Installing,
+    /// Something to tell the user on the About screen (no update to offer, or an error).
+    Info(String),
+    Failed(String),
+}
+
+/// What the update threads report back to `tick`.
+enum UpdateMsg {
+    Checked(crate::update::CheckResult),
+    Progress(u64, Option<u64>),
+    Downloaded(std::path::PathBuf),
+    Failed(String),
+}
+
 pub struct Tile {
     pub image: Arc<RenderImage>,
     pub size: (u32, u32),
@@ -178,6 +200,13 @@ pub struct App {
     /// Where closing the connection dialog returns to (the manager, if it opened it).
     pub dialog_return: View,
     hp_check: Option<Arc<Mutex<Option<String>>>>,
+    pub update: UpdateStatus,
+    update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
+    update_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The check was asked for (About screen), so its result is always shown.
+    update_manual: bool,
+    /// A version the user said "Later" to, not offered again until the next start.
+    update_dismissed: Option<String>,
     /// Connection threads signal this when a new picture is ready.
     wake: async_channel::Sender<()>,
     pub hp_result: Option<String>,
@@ -279,6 +308,11 @@ impl App {
             pick: None,
             dialog_return: View::Idle,
             hp_check: None,
+            update: UpdateStatus::Idle,
+            update_rx: None,
+            update_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_manual: false,
+            update_dismissed: None,
             hp_result: None,
             quit_requested: false,
             window_drags: 0,
@@ -561,6 +595,18 @@ impl App {
 
     pub(crate) fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_clipboard(window, cx);
+        if self.poll_update(window, cx) {
+            cx.notify();
+        }
+        // Zoomed in with the pointer against a window edge: keep scrolling that way.
+        if self.edge != (0.0, 0.0) && self.st.view == View::Idle {
+            const SPEED: f32 = 18.0; // pixels per tick (about 33 ms)
+            if let Some((mon, area)) = self.last_target {
+                if self.pan_by_at(mon, area, self.edge.0 * SPEED, self.edge.1 * SPEED) {
+                    cx.notify();
+                }
+            }
+        }
         (self.local_display_ids, self.local_displays) = local_displays(cx).into_iter().unzip();
         let mut changed = false;
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
@@ -931,6 +977,7 @@ impl App {
         }
         match self.st.view {
             View::Password => return self.cancel_password(window, cx),
+            View::Update => return self.dismiss_update(window, cx),
             View::GetFile => self.get_file = None,
             View::Dialog => {
                 self.leave_dialog();
@@ -1138,6 +1185,148 @@ impl App {
         self.field = Field::None;
         window.focus(&self.focus);
         cx.notify();
+    }
+
+    // ----- software updates ---------------------------------------------------
+
+    /// At start-up: look for an update quietly, at most once a day, when the setting allows.
+    /// (Linux's Flatpak is updated by the software manager, so it is not checked there.)
+    pub fn auto_update_check(&mut self, cx: &mut Context<Self>) {
+        if cfg!(target_os = "linux") || !self.settings.check_updates {
+            return;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if now.saturating_sub(self.settings.last_update_check) < 24 * 60 * 60 {
+            return;
+        }
+        self.settings.last_update_check = now;
+        self.save_settings();
+        self.start_update_check(false, cx);
+    }
+
+    /// Ask GitLab for the latest release on a background thread. `manual`: the user asked, so
+    /// the answer is always shown; otherwise only a newer version is mentioned.
+    pub fn start_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing) {
+            return;
+        }
+        self.update = UpdateStatus::Checking;
+        self.update_manual = manual;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateMsg::Checked(crate::update::check()));
+            let _ = wake.try_send(());
+        });
+        cx.notify();
+    }
+
+    /// "Install and restart": download the installer, then start it and quit.
+    pub fn start_update_download(&mut self, cx: &mut Context<Self>) {
+        let UpdateStatus::Available(r) = self.update.clone() else { return };
+        self.update = UpdateStatus::Downloading { received: 0, total: None };
+        self.update_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        let (wake, cancel) = (self.wake.clone(), self.update_cancel.clone());
+        std::thread::spawn(move || {
+            let mut last = std::time::Instant::now();
+            let progress_tx = tx.clone();
+            let result = crate::update::download(&r.asset_url, &r.asset_name, &cancel, |got, total| {
+                if last.elapsed() > Duration::from_millis(100) {
+                    last = std::time::Instant::now();
+                    let _ = progress_tx.send(UpdateMsg::Progress(got, total));
+                    let _ = wake.try_send(());
+                }
+            });
+            let _ = tx.send(match result {
+                Ok(path) => UpdateMsg::Downloaded(path),
+                Err(e) => UpdateMsg::Failed(e),
+            });
+            let _ = wake.try_send(());
+        });
+        cx.notify();
+    }
+
+    /// "Later" or Cancel on the update prompt.
+    pub fn dismiss_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.update.clone() {
+            UpdateStatus::Downloading { .. } => {
+                self.update_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.update_rx = None;
+                self.update = UpdateStatus::Idle;
+            }
+            UpdateStatus::Available(r) => {
+                self.update_dismissed = Some(r.version);
+                self.update = UpdateStatus::Idle;
+            }
+            UpdateStatus::Installing => return,
+            _ => self.update = UpdateStatus::Idle,
+        }
+        self.st.close_overlay();
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Handle what the update threads reported. Returns whether anything changed.
+    fn poll_update(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(rx) = &self.update_rx else { return false };
+        let msgs: Vec<UpdateMsg> = rx.try_iter().collect();
+        let mut changed = !msgs.is_empty();
+        for m in msgs {
+            match m {
+                UpdateMsg::Checked(result) => {
+                    use crate::update::CheckResult;
+                    let manual = self.update_manual;
+                    self.update = match result {
+                        CheckResult::UpToDate => if manual { UpdateStatus::UpToDate } else { UpdateStatus::Idle },
+                        CheckResult::Available(r) if !manual && self.update_dismissed.as_deref() == Some(r.version.as_str()) => {
+                            let _ = r;
+                            UpdateStatus::Idle
+                        }
+                        CheckResult::Available(r) => UpdateStatus::Available(r),
+                        CheckResult::Manual(msg) => if manual { UpdateStatus::Info(msg) } else { UpdateStatus::Idle },
+                        CheckResult::Failed(e) => {
+                            log::warn!("update check failed: {e}");
+                            if manual { UpdateStatus::Failed(e) } else { UpdateStatus::Idle }
+                        }
+                    };
+                }
+                UpdateMsg::Progress(received, total) => {
+                    if matches!(self.update, UpdateStatus::Downloading { .. }) {
+                        self.update = UpdateStatus::Downloading { received, total };
+                    }
+                }
+                UpdateMsg::Downloaded(path) => {
+                    self.update = UpdateStatus::Installing;
+                    self.update_rx = None;
+                    match crate::update::install(&path) {
+                        Ok(()) => {
+                            log::info!("update installer started; quitting");
+                            self.quit(cx);
+                        }
+                        Err(e) => {
+                            log::error!("update install failed: {e}");
+                            self.update = UpdateStatus::Failed(e);
+                        }
+                    }
+                    return true;
+                }
+                UpdateMsg::Failed(e) => {
+                    self.update_rx = None;
+                    self.update = if e == "Cancelled" { UpdateStatus::Idle } else { UpdateStatus::Failed(e) };
+                }
+            }
+        }
+        // A newer version is ready to offer: show the prompt when nothing else is in the way
+        // (or from the About screen, where the user asked).
+        if matches!(self.update, UpdateStatus::Available(_)) && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
+            self.st.set_view(View::Update);
+            window.focus(&self.focus);
+            changed = true;
+        }
+        changed
     }
 
     pub fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {

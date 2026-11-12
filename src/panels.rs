@@ -1,7 +1,7 @@
 //! Connection manager and application settings: two modal panels in the same visual
 //! language as the connection dialog (ui_design/README.md §9).
 
-use crate::app::{App, Field, SettingsTab};
+use crate::app::{App, Field, SettingsTab, UpdateStatus};
 use crate::model::*;
 use crate::settings::{CommandKey, Settings, RECONNECT_CHOICES};
 use crate::view::*;
@@ -220,6 +220,8 @@ impl App {
                     .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Sessions start on the Mac's own screen. Keep that screen to view existing windows. Use virtual display (Ctrl+Alt+V) switches to a separate display, which may start with an empty desktop."))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Files"))
                     .child(form_row("Save files from the Mac in", self.text_field("s-download", Field::Download, &st.download_dir, "~/Downloads", false, cx).into_any_element()))
+                    .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Updates"))
+                    .child(self.settings_check("s-updates", "Check for a new version when SeeMyMac starts", st.check_updates, |s, v| s.check_updates = v, cx))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Connections"))
                     .child(form_row("Reconnect attempts", self.settings_cycle("s-reconnect", &RECONNECT_CHOICES, st.max_reconnects, |n| if n == 0 { "Never reconnect".into() } else { format!("Up to {n}") }, |s, v| s.max_reconnects = v, cx)))
                     .child(form_row(
@@ -317,6 +319,7 @@ impl App {
             .child(div().mt(px(6.0)).text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).child("SeeMyMac"))
             .child(div().text_color(rgb(MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))
             .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(format!("Built {}", env!("SEEMYMAC_BUILD_TIME"))))
+            .child(self.update_status_line(cx))
             .child(div().mt(px(8.0)).child(link("about-gitlab", "gitlab.com/kestermckinney/SeeMyMac", "https://gitlab.com/kestermckinney/SeeMyMac", cx)))
             .child(div().w_full().h(px(1.0)).bg(rgb(DIVIDER)).my(px(10.0)))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Project managers: meet Project Notes"))
@@ -329,12 +332,93 @@ impl App {
             )
             .child(link("about-pnp", "www.projectnotespro.com", "https://www.projectnotespro.com", cx))
             .into_any_element();
+        let busy = matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing);
         let footer = div()
             .flex()
             .w_full()
+            .child(secondary_btn("about-update", if busy { "Checking…" } else { "Check for updates" }).on_click(cx.listener(|this, _, _, cx| this.start_update_check(true, cx))))
             .child(div().flex_1())
             .child(primary_btn("about-close", "Close").on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx))))
             .into_any_element();
         self.modal("about-scrim", "about", 460.0, "About SeeMyMac", None, body, footer, cx)
+    }
+
+    /// The line under the version on the About screen that says how an update check went.
+    fn update_status_line(&self, _cx: &mut Context<Self>) -> AnyElement {
+        let (text, color) = match &self.update {
+            UpdateStatus::Checking => ("Checking for updates…".to_string(), MUTED),
+            UpdateStatus::UpToDate => ("You have the latest version.".to_string(), MUTED),
+            UpdateStatus::Info(m) => (m.clone(), MUTED),
+            UpdateStatus::Failed(m) => (m.clone(), DANGER),
+            _ => return div().into_any_element(),
+        };
+        div().mt(px(6.0)).max_w(px(380.0)).text_align(TextAlign::Center).text_size(px(12.0)).text_color(rgb(color)).child(text).into_any_element()
+    }
+
+    // ----- software update prompt --------------------------------------------------
+
+    pub(crate) fn update_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mb = |n: u64| format!("{:.1} MB", n as f64 / 1_048_576.0);
+        let (title, body, footer): (String, AnyElement, AnyElement) = match &self.update {
+            UpdateStatus::Available(r) => {
+                let notes: String = r.notes.trim().chars().take(1500).collect();
+                (
+                    format!("SeeMyMac {} is available", r.version),
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(div().child(format!("You have version {}. Download and install version {} now? SeeMyMac will restart.", crate::update::current_version(), r.version)))
+                        .children((!notes.is_empty()).then(|| div().id("update-notes").max_h(px(220.0)).overflow_y_scroll().p(px(10.0)).rounded(px(6.0)).border_1().border_color(rgb(BORDER)).text_size(px(12.0)).text_color(rgb(MUTED)).child(notes)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .w_full()
+                        .gap(px(8.0))
+                        .child(div().flex_1())
+                        .child(secondary_btn("update-later", "Later").on_click(cx.listener(|this, _, window, cx| this.dismiss_update(window, cx))))
+                        .child(primary_btn("update-install", "Install and restart").on_click(cx.listener(|this, _, _, cx| this.start_update_download(cx))))
+                        .into_any_element(),
+                )
+            }
+            UpdateStatus::Downloading { received, total } => {
+                let frac = total.filter(|t| *t > 0).map(|t| (*received as f32 / t as f32).clamp(0.0, 1.0));
+                let label = match total {
+                    Some(t) => format!("Downloading… {} of {}", mb(*received), mb(*t)),
+                    None => format!("Downloading… {}", mb(*received)),
+                };
+                (
+                    "Downloading the update".to_string(),
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(div().child(label))
+                        .child(div().w_full().h(px(6.0)).rounded(px(3.0)).bg(rgb(BORDER)).child(div().h_full().rounded(px(3.0)).bg(rgb(ACCENT)).w(relative(frac.unwrap_or(0.05)))))
+                        .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child("SeeMyMac restarts by itself when the update is installed."))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .w_full()
+                        .child(div().flex_1())
+                        .child(secondary_btn("update-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.dismiss_update(window, cx))))
+                        .into_any_element(),
+                )
+            }
+            UpdateStatus::Installing => (
+                "Installing the update".to_string(),
+                div().child("Restarting SeeMyMac…").into_any_element(),
+                div().into_any_element(),
+            ),
+            UpdateStatus::Failed(m) => (
+                "The update did not install".to_string(),
+                div().max_w(px(440.0)).text_color(rgb(DANGER)).child(m.clone()).into_any_element(),
+                div().flex().w_full().child(div().flex_1()).child(primary_btn("update-close", "Close").on_click(cx.listener(|this, _, window, cx| this.dismiss_update(window, cx)))).into_any_element(),
+            ),
+            _ => return div().into_any_element(),
+        };
+        self.modal("update-scrim", "update", 480.0, &title, None, body, footer, cx)
     }
 }

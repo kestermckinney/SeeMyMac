@@ -31,6 +31,7 @@ fn main() {
                 cx.new(|cx| {
                     let mut app = App::with_settings(store, settings, font, window, cx);
                     app.shortcuts = Some(see_my_mac::inhibit::Shortcuts::for_window(window));
+                    app.auto_update_check(cx);
                     app
                 })
             },

@@ -171,6 +171,18 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Idle, "Escape closes it");
 
+    // A found update is offered; "Later" (Escape) closes the prompt and is remembered.
+    view.update_in(cx, |a, w, cx| {
+        a.update = crate::app::UpdateStatus::Available(crate::update::Release { version: "9.9.9".into(), notes: "Notes".into(), asset_url: "https://example.com/x".into(), asset_name: "x".into() });
+        a.st.set_view(View::Update);
+        cx.notify();
+        let _ = w;
+    });
+    draw(cx);
+    assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Update);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(view.read_with(cx, |a, _| (a.st.view, a.update.clone())), (View::Idle, crate::app::UpdateStatus::Idle));
+
     cx.simulate_keystrokes("ctrl-n");
     draw(cx);
     assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Dialog);

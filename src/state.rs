@@ -14,6 +14,8 @@ pub enum View {
     Manage,
     /// Application settings.
     Settings,
+    /// A newer version is available: asks whether to install it, then shows the download.
+    Update,
     /// The About screen: icon, version, build time and links.
     About,
     /// Asks for a password when a connection uses "Ask when connecting".

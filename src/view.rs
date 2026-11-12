@@ -1245,6 +1245,7 @@ impl Render for App {
             .when(view == View::Manage, |d| d.child(self.manage_panel(cx)))
             .when(view == View::Settings, |d| d.child(self.settings_panel(cx)))
             .when(view == View::About, |d| d.child(self.about_panel(cx)))
+            .when(view == View::Update, |d| d.child(self.update_panel(cx)))
             .when(view == View::Password, |d| d.child(self.password_prompt(cx)))
             .when(view == View::GetFile, |d| d.child(self.get_file_prompt(cx)));
 

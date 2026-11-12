@@ -13,6 +13,7 @@ pub mod rdp_scard;
 pub mod rfb;
 pub mod settings;
 pub mod span;
+pub mod update;
 pub mod state;
 pub mod vault;
 pub mod panels;
