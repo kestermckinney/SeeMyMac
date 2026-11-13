@@ -39,9 +39,10 @@ pub struct Settings {
     pub capture_system_keys: bool,
     /// While zoomed in, pushing the pointer against a window edge scrolls the picture that way.
     pub edge_scroll: bool,
-    /// Look for a newer SeeMyMac at start-up (at most once a day) and offer to install it.
+    /// Look for a newer SeeMyMac at start-up and every few hours while running, and offer to
+    /// install it. "Check for updates" on the About screen works either way.
     pub check_updates: bool,
-    /// When the last automatic check ran (seconds since 1970).
+    /// When the last automatic check started (seconds since 1970), for the periodic check.
     pub last_update_check: u64,
     /// Where files fetched from the Mac are saved (`~` is this user's home).
     pub download_dir: String,

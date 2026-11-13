@@ -226,7 +226,12 @@ impl App {
                             .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Every command is also in the macOS menu bar. Turn the toolbar off to use only the menu bar; in full screen, move the pointer to the top of the screen to show it."))
                     })
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Updates"))
-                    .child(self.settings_check("s-updates", "Check for a new version when SeeMyMac starts", st.check_updates, |s, v| s.check_updates = v, cx))
+                    .child(self.settings_check("s-updates", "Check for updates automatically", st.check_updates, |s, v| s.check_updates = v, cx))
+                    .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child(if cfg!(target_os = "linux") {
+                        "On Linux, SeeMyMac is updated by your software manager (Flatpak)."
+                    } else {
+                        "Looks for a new version at start-up and every 6 hours, and asks before installing it. Check for updates under About works either way."
+                    }))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Connections"))
                     .child(form_row("Reconnect attempts", self.settings_cycle("s-reconnect", &RECONNECT_CHOICES, st.max_reconnects, |n| if n == 0 { "Never reconnect".into() } else { format!("Up to {n}") }, |s, v| s.max_reconnects = v, cx)))
                     .child(form_row(

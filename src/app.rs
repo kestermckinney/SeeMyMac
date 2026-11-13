@@ -37,6 +37,13 @@ impl Status {
     }
 }
 
+/// How often a running SeeMyMac looks for a newer version (seconds), besides at start-up.
+pub const UPDATE_INTERVAL: u64 = 6 * 60 * 60;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// Where a software update stands (see `update.rs`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateStatus {
@@ -210,6 +217,9 @@ pub struct App {
     update_manual: bool,
     /// A version the user said "Later" to, not offered again until the next start.
     update_dismissed: Option<String>,
+    /// Asks the server for the latest release (on a background thread). Tests swap in a stub so
+    /// they never reach the network.
+    pub update_checker: fn() -> crate::update::CheckResult,
     /// Connection threads signal this when a new picture is ready.
     wake: async_channel::Sender<()>,
     pub hp_result: Option<String>,
@@ -318,6 +328,7 @@ impl App {
             update_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_manual: false,
             update_dismissed: None,
+            update_checker: if cfg!(test) { || crate::update::CheckResult::UpToDate } else { crate::update::check },
             hp_result: None,
             quit_requested: false,
             window_drags: 0,
@@ -607,6 +618,7 @@ impl App {
 
     pub(crate) fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_clipboard(window, cx);
+        self.periodic_update_check(cx);
         if self.poll_update(window, cx) {
             cx.notify();
         }
@@ -1218,17 +1230,34 @@ impl App {
 
     // ----- software updates ---------------------------------------------------
 
-    /// At start-up: look for an update quietly, at most once a day, when the setting allows.
-    /// (Linux's Flatpak is updated by the software manager, so it is not checked there.)
+    /// Whether SeeMyMac looks for updates by itself. Off when the user turned it off in Settings,
+    /// and on Linux, where Flatpak is updated by the software manager.
+    fn auto_updates_on(&self) -> bool {
+        !cfg!(target_os = "linux") && self.settings.check_updates
+    }
+
+    /// At start-up: look for an update quietly, when the setting allows.
     pub fn auto_update_check(&mut self, cx: &mut Context<Self>) {
-        if cfg!(target_os = "linux") || !self.settings.check_updates {
+        if self.auto_updates_on() {
+            self.quiet_update_check(cx);
+        }
+    }
+
+    /// While running: look again once [`UPDATE_INTERVAL`] has passed since the last check (by
+    /// this or another SeeMyMac window, as the time is kept in the settings). Called from `tick`.
+    fn periodic_update_check(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_updates_on() || self.update != UpdateStatus::Idle {
             return;
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        if now.saturating_sub(self.settings.last_update_check) < 24 * 60 * 60 {
-            return;
+        let (now, last) = (unix_now(), self.settings.last_update_check);
+        // A clock set back past the last check counts as due, so checks never stop.
+        if now < last || now - last >= UPDATE_INTERVAL {
+            self.quiet_update_check(cx);
         }
-        self.settings.last_update_check = now;
+    }
+
+    fn quiet_update_check(&mut self, cx: &mut Context<Self>) {
+        self.settings.last_update_check = unix_now();
         self.save_settings();
         self.start_update_check(false, cx);
     }
@@ -1243,9 +1272,9 @@ impl App {
         self.update_manual = manual;
         let (tx, rx) = std::sync::mpsc::channel();
         self.update_rx = Some(rx);
-        let wake = self.wake.clone();
+        let (wake, check) = (self.wake.clone(), self.update_checker);
         std::thread::spawn(move || {
-            let _ = tx.send(UpdateMsg::Checked(crate::update::check()));
+            let _ = tx.send(UpdateMsg::Checked(check()));
             let _ = wake.try_send(());
         });
         cx.notify();
@@ -1349,8 +1378,10 @@ impl App {
             }
         }
         // A newer version is ready to offer: show the prompt when nothing else is in the way
-        // (or from the About screen, where the user asked).
-        if matches!(self.update, UpdateStatus::Available(_)) && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
+        // (or from the About screen, where the user asked). A background check never interrupts
+        // a remote session: the offer waits until the user is back on the start screen.
+        let in_the_way = !self.update_manual && self.st.active.is_some();
+        if matches!(self.update, UpdateStatus::Available(_)) && !in_the_way && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
             self.st.set_view(View::Update);
             window.focus(&self.focus);
             changed = true;

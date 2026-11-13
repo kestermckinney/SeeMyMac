@@ -188,6 +188,53 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Dialog);
 }
 
+/// With "Check for updates automatically" on, a running SeeMyMac looks again once the interval
+/// has passed; a version found during a remote session waits until the user is back on the start
+/// screen. Turned off, it never looks by itself.
+#[gpui::test]
+fn updates_are_checked_periodically_without_interrupting_a_session(cx: &mut TestAppContext) {
+    let (port, _rx) = fake_mac(32, 18, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    let release = || crate::update::CheckResult::Available(crate::update::Release { version: "9.9.9".into(), notes: String::new(), asset_url: "https://example.com/x".into(), asset_name: "x".into() });
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    // Turned off: an overdue check does not run.
+    view.update(cx, |a, _| {
+        a.update_checker = release;
+        a.settings.check_updates = false;
+        a.settings.last_update_check = 0;
+    });
+    for _ in 0..3 {
+        cx.update(|window, cx| view.update(cx, |a, cx| a.tick(window, cx)));
+    }
+    assert_eq!(view.read_with(cx, |a, _| (a.update.clone(), a.settings.last_update_check)), (crate::app::UpdateStatus::Idle, 0));
+
+    // On, checked recently: nothing until the interval has passed.
+    view.update(cx, |a, _| {
+        a.settings.check_updates = true;
+        a.settings.last_update_check = now;
+    });
+    cx.update(|window, cx| view.update(cx, |a, cx| a.tick(window, cx)));
+    assert_eq!(view.read_with(cx, |a, _| a.update.clone()), crate::app::UpdateStatus::Idle);
+
+    // In a session when the interval runs out: the update is found but not shown yet.
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected", |a| a.sessions["c1"].status == Status::Connected);
+    view.update(cx, |a, _| a.settings.last_update_check = now - crate::app::UPDATE_INTERVAL);
+    tick_until(cx, &view, "update found", |a| matches!(a.update, crate::app::UpdateStatus::Available(_)));
+    for _ in 0..3 {
+        cx.update(|window, cx| view.update(cx, |a, cx| a.tick(window, cx)));
+    }
+    view.read_with(cx, |a, _| {
+        assert!(a.settings.last_update_check >= now, "the check time is recorded");
+        assert_ne!(a.st.view, View::Update, "a remote session is not interrupted");
+    });
+
+    // Back on the start screen, it is offered.
+    cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("c1", window, cx)));
+    tick_until(cx, &view, "update offered", |a| a.st.view == View::Update);
+}
+
 #[gpui::test]
 fn menu_exit_closes_connected_sessions_and_quits(cx: &mut TestAppContext) {
     let (port, _rx) = fake_mac(64, 36, false);
