@@ -188,6 +188,53 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |a, _| a.st.view), View::Dialog);
 }
 
+/// With "Check for updates automatically" on, a running SeeMyMac looks again once the interval
+/// has passed; a version found during a remote session waits until the user is back on the start
+/// screen. Turned off, it never looks by itself.
+#[gpui::test]
+fn updates_are_checked_periodically_without_interrupting_a_session(cx: &mut TestAppContext) {
+    let (port, _rx) = fake_mac(32, 18, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    let release = || crate::update::CheckResult::Available(crate::update::Release { version: "9.9.9".into(), notes: String::new(), asset_url: "https://example.com/x".into(), asset_name: "x".into() });
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    // Turned off: an overdue check does not run.
+    view.update(cx, |a, _| {
+        a.update_checker = release;
+        a.settings.check_updates = false;
+        a.settings.last_update_check = 0;
+    });
+    for _ in 0..3 {
+        cx.update(|window, cx| view.update(cx, |a, cx| a.tick(window, cx)));
+    }
+    assert_eq!(view.read_with(cx, |a, _| (a.update.clone(), a.settings.last_update_check)), (crate::app::UpdateStatus::Idle, 0));
+
+    // On, checked recently: nothing until the interval has passed.
+    view.update(cx, |a, _| {
+        a.settings.check_updates = true;
+        a.settings.last_update_check = now;
+    });
+    cx.update(|window, cx| view.update(cx, |a, cx| a.tick(window, cx)));
+    assert_eq!(view.read_with(cx, |a, _| a.update.clone()), crate::app::UpdateStatus::Idle);
+
+    // In a session when the interval runs out: the update is found but not shown yet.
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected", |a| a.sessions["c1"].status == Status::Connected);
+    view.update(cx, |a, _| a.settings.last_update_check = now - crate::app::UPDATE_INTERVAL);
+    tick_until(cx, &view, "update found", |a| matches!(a.update, crate::app::UpdateStatus::Available(_)));
+    for _ in 0..3 {
+        cx.update(|window, cx| view.update(cx, |a, cx| a.tick(window, cx)));
+    }
+    view.read_with(cx, |a, _| {
+        assert!(a.settings.last_update_check >= now, "the check time is recorded");
+        assert_ne!(a.st.view, View::Update, "a remote session is not interrupted");
+    });
+
+    // Back on the start screen, it is offered.
+    cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("c1", window, cx)));
+    tick_until(cx, &view, "update offered", |a| a.st.view == View::Update);
+}
+
 #[gpui::test]
 fn menu_exit_closes_connected_sessions_and_quits(cx: &mut TestAppContext) {
     let (port, _rx) = fake_mac(64, 36, false);
@@ -772,6 +819,47 @@ fn every_overlay_is_painted_with_a_real_size(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("switcher").is_some(), "switcher was not painted");
 }
 
+/// A server that turns the password down brings the sign-in dialog back (not a raw error), and a
+/// new password typed there with "Save password" ticked lands in the vault.
+#[gpui::test]
+fn rejected_login_asks_again_and_saves_the_new_password(cx: &mut TestAppContext) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        s.write_all(b"RFB 003.008\n").unwrap();
+        s.read_exact(&mut [0u8; 12]).unwrap();
+        s.write_all(&[1, 2]).unwrap();
+        s.read_exact(&mut [0u8; 1]).unwrap();
+        s.write_all(&[0; 16]).unwrap();
+        s.read_exact(&mut [0u8; 16]).unwrap();
+        s.write_all(&1u32.to_be_bytes()).unwrap();
+        s.write_all(&12u32.to_be_bytes()).unwrap();
+        s.write_all(b"Bad password").unwrap();
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    crate::vault::delete("c1");
+    cx.update(|window, cx| view.update(cx, |a, cx| a.open_connection("c1", window, cx)));
+    draw(cx);
+    cx.simulate_input("wrong");
+    cx.simulate_keystrokes("enter");
+    tick_until(cx, &view, "the sign-in dialog again", |a| a.st.view == View::Password && a.pw.as_ref().map_or(false, |p| p.error.is_some()));
+    view.read_with(cx, |a, _| {
+        let p = a.pw.as_ref().unwrap();
+        assert!(p.error.as_deref().unwrap().contains("Bad password"), "{:?}", p.error);
+        assert!(!p.save, "an \"Ask\" connection starts unticked");
+    });
+    draw(cx);
+    let save = cx.debug_bounds("pw-save").expect("save checkbox painted").center();
+    cx.simulate_click(save, gpui::Modifiers::none());
+    assert!(view.read_with(cx, |a, _| a.pw.as_ref().unwrap().save));
+    cx.simulate_input("right");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(crate::vault::get("c1").unwrap().as_deref(), Some("right"));
+    assert_eq!(view.read_with(cx, |a, _| a.store.get("c1").unwrap().credentials), CredentialMode::Vault);
+    crate::vault::delete("c1");
+}
+
 // ----- connection manager -----------------------------------------------------------
 
 #[gpui::test]
@@ -908,6 +996,44 @@ fn command_key_setting_swaps_modifiers_sent_to_the_mac(cx: &mut TestAppContext) 
     }
     assert!(seen.windows(8).any(|w| w == [4, 1, 0, 0, 0, 0, 0xff, 0xeb]), "Ctrl should arrive as Command: {seen:?}");
     assert!(!seen.windows(8).any(|w| w == [4, 1, 0, 0, 0, 0, 0xff, 0xe3]), "and not as Control");
+}
+
+#[gpui::test]
+fn cmd_space_combo_reaches_the_mac_as_command_space(cx: &mut TestAppContext) {
+    let (port, rx) = fake_mac(32, 18, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected", |a| a.sessions["c1"].status == Status::Connected);
+    let i = crate::app::KEY_COMBOS.iter().position(|c| c.label.starts_with("Cmd+Space")).expect("Cmd+Space is offered");
+    view.update(cx, |a, _| a.send_key_combo(i));
+    // KeyEvent (4): Command down, Space down, Space up, Command up.
+    let want: [[u8; 8]; 4] = [[4, 1, 0, 0, 0, 0, 0xff, 0xeb], [4, 1, 0, 0, 0, 0, 0, 0x20], [4, 0, 0, 0, 0, 0, 0, 0x20], [4, 0, 0, 0, 0, 0, 0xff, 0xeb]];
+    let end = Instant::now() + Duration::from_secs(5);
+    let mut seen = vec![];
+    while Instant::now() < end && !want.iter().all(|w| seen.windows(8).any(|s| s == w)) {
+        if let Ok(v) = rx.recv_timeout(Duration::from_millis(100)) {
+            seen = v;
+        }
+    }
+    let pos = |w: &[u8; 8]| seen.windows(8).position(|s| s == w);
+    let order: Vec<_> = want.iter().map(pos).collect();
+    assert!(order.iter().all(Option::is_some), "all four key events sent: {seen:?}");
+    assert!(order.windows(2).all(|p| p[0] < p[1]), "in order: {order:?}");
+}
+
+#[gpui::test]
+fn turning_the_toolbar_off_gives_its_room_to_the_remote_screen(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(None), None, window, cx));
+    draw(cx);
+    let with_bar = view.read_with(cx, |a, _| a.area.get().origin.y);
+    view.update(cx, |a, _| a.settings.show_toolbar = false);
+    draw(cx);
+    let without = view.read_with(cx, |a, _| a.area.get().origin.y);
+    if cfg!(target_os = "macos") {
+        assert_eq!(f32::from(with_bar - without), crate::view::TOOLBAR_H, "the toolbar's height goes to the remote screen");
+    } else {
+        assert_eq!(with_bar, without, "only macOS, with its menu bar, can hide the toolbar");
+    }
 }
 
 /// Live check against a real Mac, through the real UI code (not run by default):

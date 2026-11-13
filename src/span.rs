@@ -19,6 +19,14 @@ impl SpanScreen {
         cx.observe(&app, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus);
+        // Closing this window ends the connection, which closes the windows on the other
+        // monitors too (instead of the app reopening this one).
+        let (a, m) = (app.clone(), main);
+        window.on_window_should_close(cx, move |_, cx| {
+            let app = a.clone();
+            let _ = m.update(cx, move |_, main, cx| app.update(cx, |a, cx| a.end_span(main, cx)));
+            true
+        });
         Self { app, main, monitor, focus }
     }
 

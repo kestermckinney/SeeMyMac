@@ -30,7 +30,14 @@
 
   <content_rating type="oars-1.1"/>
 
+  <!-- Software centres tint the app's banner with these: the icon's sea green and navy. -->
+  <branding>
+    <color type="primary" scheme_preference="light">#88c4ba</color>
+    <color type="primary" scheme_preference="dark">#293f6e</color>
+  </branding>
+
   <releases>
+    <release version="0.2.2" date="2026-11-12"/>
     <release version="0.2.1" date="2026-11-12"/>
     <release version="0.2.0" date="2026-11-12"/>
     <release version="0.1.4" date="2026-11-09"/>

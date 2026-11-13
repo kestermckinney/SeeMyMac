@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="164" height="314" viewBox="0 0 164 314">
+  <title>SeeMyMac installer side panel</title>
+  <desc>The tall image on the Windows installer's welcome and finish pages, in the app's dark chrome and accent blue.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#010409"/>
+      <stop offset="0.55" stop-color="#0D1117"/>
+      <stop offset="1" stop-color="#293f6e"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#2F6FEB" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#2F6FEB" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="164" height="314" fill="url(#bg)"/>
+  <circle cx="82" cy="112" r="92" fill="url(#glow)"/>
+  <circle cx="82" cy="112" r="70" fill="none" stroke="#6CA4FF" stroke-opacity="0.18" stroke-width="1"/>
+  <circle cx="82" cy="112" r="88" fill="none" stroke="#6CA4FF" stroke-opacity="0.10" stroke-width="1"/>
+  <g transform="translate(40 70) scale(0.328125)">
+    <rect width="256" height="256" rx="54" fill="#293f6e"/>
+    <rect x="29" y="40" width="150" height="108" rx="15" fill="none" stroke="#f3f1e8" stroke-width="11" opacity=".65"/>
+    <path d="M78 151v13m-20 0h40" fill="none" stroke="#f3f1e8" stroke-width="10" stroke-linecap="round" opacity=".65"/>
+    <rect x="68" y="84" width="160" height="116" rx="16" fill="#f3f1e8"/>
+    <rect x="80" y="96" width="136" height="78" rx="5" fill="#88c4ba"/>
+    <path d="M124 149l45-31m-22-2l24 1-2 24" fill="none" stroke="#293f6e" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M147 200v16m-27 0h54" fill="none" stroke="#f3f1e8" stroke-width="11" stroke-linecap="round"/>
+  </g>
+  <text x="82" y="200" text-anchor="middle" font-family="Helvetica Neue, Segoe UI, Arial" font-weight="600" font-size="19" fill="#E6EDF3">SeeMyMac</text>
+  <rect x="62" y="211" width="40" height="3" rx="1.5" fill="#2F6FEB"/>
+  <text x="82" y="232" text-anchor="middle" font-family="Helvetica Neue, Segoe UI, Arial" font-size="9.5" fill="#9198A1">Your Mac, on any screen</text>
+  <g fill="none" stroke-linecap="round" stroke-width="2">
+    <path d="M20 282h46" stroke="#88c4ba" stroke-opacity="0.55"/>
+    <path d="M74 282h24" stroke="#6CA4FF" stroke-opacity="0.55"/>
+    <path d="M106 282h38" stroke="#f3f1e8" stroke-opacity="0.25"/>
+    <path d="M36 292h30" stroke="#f3f1e8" stroke-opacity="0.18"/>
+    <path d="M74 292h54" stroke="#88c4ba" stroke-opacity="0.30"/>
+  </g>
+</svg>

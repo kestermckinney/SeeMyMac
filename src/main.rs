@@ -40,9 +40,12 @@ fn main() {
                 })
             },
         );
-        if let Err(e) = opened {
-            eprintln!("SeeMyMac could not open its window: {e:#}");
-            std::process::exit(1);
+        match opened {
+            Ok(main) => see_my_mac::menus::install(main, cx),
+            Err(e) => {
+                eprintln!("SeeMyMac could not open its window: {e:#}");
+                std::process::exit(1);
+            }
         }
         cx.activate(true);
     });

@@ -37,6 +37,13 @@ impl Status {
     }
 }
 
+/// How often a running SeeMyMac looks for a newer version (seconds), besides at start-up.
+pub const UPDATE_INTERVAL: u64 = 6 * 60 * 60;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// Where a software update stands (see `update.rs`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateStatus {
@@ -185,6 +192,9 @@ pub struct PwPrompt {
     pub user: String,
     pub pass: String,
     pub error: Option<String>,
+    /// "Save password in the credential vault" is ticked: the password is stored when it is
+    /// submitted (and the connection switches to the vault); unticked forgets a saved one.
+    pub save: bool,
 }
 
 pub struct App {
@@ -207,6 +217,9 @@ pub struct App {
     update_manual: bool,
     /// A version the user said "Later" to, not offered again until the next start.
     update_dismissed: Option<String>,
+    /// Asks the server for the latest release (on a background thread). Tests swap in a stub so
+    /// they never reach the network.
+    pub update_checker: fn() -> crate::update::CheckResult,
     /// Connection threads signal this when a new picture is ready.
     wake: async_channel::Sender<()>,
     pub hp_result: Option<String>,
@@ -271,6 +284,8 @@ pub const KEY_COMBOS: &[KeyCombo] = &[
     KeyCombo { label: "Alt+F4", mods: &[rfb::KEYSYM_ALT], key: 0xffc1 },
     KeyCombo { label: "Alt+Esc", mods: &[rfb::KEYSYM_ALT], key: 0xff1b },
     KeyCombo { label: "Win / Super", mods: &[], key: rfb::KEYSYM_SUPER },
+    // Super is the Mac's Command key; this Mac's own Spotlight takes Cmd+Space when typed here.
+    KeyCombo { label: "Cmd+Space (Spotlight)", mods: &[rfb::KEYSYM_SUPER], key: 0x20 },
     KeyCombo { label: "Win+D (show desktop)", mods: &[rfb::KEYSYM_SUPER], key: 0x64 },
     KeyCombo { label: "Win+E (explorer)", mods: &[rfb::KEYSYM_SUPER], key: 0x65 },
     KeyCombo { label: "Win+L (lock)", mods: &[rfb::KEYSYM_SUPER], key: 0x6c },
@@ -313,6 +328,7 @@ impl App {
             update_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_manual: false,
             update_dismissed: None,
+            update_checker: if cfg!(test) { || crate::update::CheckResult::UpToDate } else { crate::update::check },
             hp_result: None,
             quit_requested: false,
             window_drags: 0,
@@ -357,6 +373,13 @@ impl App {
                 break;
             }
         }));
+        // Closing the main window while spanning ends that connection, which closes the
+        // full-screen windows on the other monitors too.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = this.update(cx, |a, cx| a.end_span(window, cx));
+            true
+        });
         app
     }
 
@@ -595,6 +618,7 @@ impl App {
 
     pub(crate) fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_clipboard(window, cx);
+        self.periodic_update_check(cx);
         if self.poll_update(window, cx) {
             cx.notify();
         }
@@ -673,8 +697,7 @@ impl App {
                     Event::Disconnected(reason) => {
                         s.handle = None;
                         let reason = reason.unwrap_or_else(|| "The remote computer closed the connection.".into());
-                        let wants_login = reason.contains("requires a password") || reason.contains("authentication failed");
-                        if wants_login {
+                        if rfb::wants_login(&reason) {
                             s.status = Status::Failed(reason.clone());
                             prompt = Some((id.clone(), reason));
                         } else if s.ever_connected && conn.as_ref().map_or(false, |c| c.reconnect) && s.attempts < self.settings.max_reconnects {
@@ -850,7 +873,8 @@ impl App {
 
     pub fn show_password(&mut self, id: &str, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let user = self.sessions.get(id).map(|s| s.user.clone()).unwrap_or_default();
-        self.pw = Some(PwPrompt { conn_id: id.to_string(), user, pass: String::new(), error });
+        let save = self.store.get(id).map_or(false, |c| c.credentials == model::CredentialMode::Vault);
+        self.pw = Some(PwPrompt { conn_id: id.to_string(), user, pass: String::new(), error, save });
         self.st.set_view(View::Password);
         self.field_cursor = None;
         self.field_anchor = None;
@@ -866,15 +890,32 @@ impl App {
         self.field_anchor = None;
         self.field = Field::None;
         if let Some(c) = self.store.get_mut(&p.conn_id) {
+            let mut dirty = false;
             if c.user != p.user {
                 c.user = p.user.clone();
+                dirty = true;
+            }
+            // Ticking "Save password" moves an "Ask" connection to the vault; unticking it moves a
+            // vault connection back to asking and forgets what was saved.
+            let mode = match (p.save, c.credentials) {
+                (true, model::CredentialMode::Ask) => model::CredentialMode::Vault,
+                (false, model::CredentialMode::Vault) => model::CredentialMode::Ask,
+                (_, m) => m,
+            };
+            if mode != c.credentials {
+                c.credentials = mode;
+                dirty = true;
+            }
+            if dirty {
                 self.persist();
             }
         }
-        if self.store.get(&p.conn_id).map_or(false, |c| c.credentials == model::CredentialMode::Vault) && !p.pass.is_empty() {
+        if p.save && !p.pass.is_empty() {
             if let Err(e) = vault::set(&p.conn_id, &p.pass) {
                 log::warn!("could not save password to the vault: {e}");
             }
+        } else if !p.save {
+            vault::delete(&p.conn_id);
         }
         if let Some(s) = self.sessions.get_mut(&p.conn_id) {
             s.user = p.user;
@@ -1189,17 +1230,34 @@ impl App {
 
     // ----- software updates ---------------------------------------------------
 
-    /// At start-up: look for an update quietly, at most once a day, when the setting allows.
-    /// (Linux's Flatpak is updated by the software manager, so it is not checked there.)
+    /// Whether SeeMyMac looks for updates by itself. Off when the user turned it off in Settings,
+    /// and on Linux, where Flatpak is updated by the software manager.
+    fn auto_updates_on(&self) -> bool {
+        !cfg!(target_os = "linux") && self.settings.check_updates
+    }
+
+    /// At start-up: look for an update quietly, when the setting allows.
     pub fn auto_update_check(&mut self, cx: &mut Context<Self>) {
-        if cfg!(target_os = "linux") || !self.settings.check_updates {
+        if self.auto_updates_on() {
+            self.quiet_update_check(cx);
+        }
+    }
+
+    /// While running: look again once [`UPDATE_INTERVAL`] has passed since the last check (by
+    /// this or another SeeMyMac window, as the time is kept in the settings). Called from `tick`.
+    fn periodic_update_check(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_updates_on() || self.update != UpdateStatus::Idle {
             return;
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        if now.saturating_sub(self.settings.last_update_check) < 24 * 60 * 60 {
-            return;
+        let (now, last) = (unix_now(), self.settings.last_update_check);
+        // A clock set back past the last check counts as due, so checks never stop.
+        if now < last || now - last >= UPDATE_INTERVAL {
+            self.quiet_update_check(cx);
         }
-        self.settings.last_update_check = now;
+    }
+
+    fn quiet_update_check(&mut self, cx: &mut Context<Self>) {
+        self.settings.last_update_check = unix_now();
         self.save_settings();
         self.start_update_check(false, cx);
     }
@@ -1214,9 +1272,9 @@ impl App {
         self.update_manual = manual;
         let (tx, rx) = std::sync::mpsc::channel();
         self.update_rx = Some(rx);
-        let wake = self.wake.clone();
+        let (wake, check) = (self.wake.clone(), self.update_checker);
         std::thread::spawn(move || {
-            let _ = tx.send(UpdateMsg::Checked(crate::update::check()));
+            let _ = tx.send(UpdateMsg::Checked(check()));
             let _ = wake.try_send(());
         });
         cx.notify();
@@ -1320,8 +1378,10 @@ impl App {
             }
         }
         // A newer version is ready to offer: show the prompt when nothing else is in the way
-        // (or from the About screen, where the user asked).
-        if matches!(self.update, UpdateStatus::Available(_)) && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
+        // (or from the About screen, where the user asked). A background check never interrupts
+        // a remote session: the offer waits until the user is back on the start screen.
+        let in_the_way = !self.update_manual && self.st.active.is_some();
+        if matches!(self.update, UpdateStatus::Available(_)) && !in_the_way && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
             self.st.set_view(View::Update);
             window.focus(&self.focus);
             changed = true;
@@ -1867,6 +1927,20 @@ impl App {
         let s = self.active_session()?;
         let t = s.tiles.iter().find(|t| t.monitor == m)?;
         Some((t.image.clone(), t.size, s.scaling, s.span_pans.get(m).copied().unwrap_or_default()))
+    }
+
+    /// Closing any window of "Span all local monitors" (the main one or one on another
+    /// monitor) ends the connection it shows, and with it the windows on every monitor.
+    /// `window` is the main window.
+    pub fn end_span(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.span && self.span_windows.is_empty() {
+            return;
+        }
+        if let Some(id) = self.st.active.clone() {
+            self.close_session(&id, window, cx);
+        }
+        self.span = false;
+        self.sync_span_windows(window, cx);
     }
 
     /// Open or close the extra full-screen windows that "Span all local monitors" needs.
