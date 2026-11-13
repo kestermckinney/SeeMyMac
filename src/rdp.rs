@@ -358,17 +358,18 @@ fn dial(
     // Open the audio device alongside the connection: it can take seconds (WASAPI), and some
     // servers (GNOME Remote Desktop) hang up on a client that stays silent for about two.
     let audio = cfg.audio.then(open_audio);
-    let addr = match &cfg.gateway {
+    let tcp = match &cfg.gateway {
         // Through an RD Gateway: connect to the local end of its tunnel; the real host name is still
         // what TLS and sign-in use.
         Some(gw) => {
             stage(ev, &format!("Signing in to the gateway {gw}…"));
             let gw_user = cfg.username.clone();
-            crate::rdp_gateway::start(gw, &gw_user, &cfg.password, host, "SeeMyMac")?
+            let addr = crate::rdp_gateway::start(gw, &gw_user, &cfg.password, host, "SeeMyMac")?;
+            TcpStream::connect_timeout(&addr, Duration::from_secs(10)).with_context(|| format!("cannot connect to {addr}"))?
         }
-        None => (host, port).to_socket_addrs().with_context(|| format!("cannot resolve {host}"))?.next().context("no address for that host")?,
+        // Try every address the name resolves to (Tailscale, then IPv4, then IPv6).
+        None => crate::dial::connect(host, port, |a| stage(ev, &format!("Connecting to {host} ({})…", a.ip())))?,
     };
-    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).with_context(|| format!("cannot connect to {addr}"))?;
     tcp.set_nodelay(true).ok();
     let client_addr = tcp.local_addr()?;
 

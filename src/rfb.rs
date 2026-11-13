@@ -7,11 +7,11 @@
 
 use crate::hp::{clipboard, filecopy};
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use md5::{Digest, Md5};
 use num_bigint::{BigUint, RandBigInt};
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream};
 use std::sync::mpsc::{channel, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -304,14 +304,7 @@ fn run(
         events.send(Event::Stage(t)).ok();
     };
     stage(format!("Looking up {}…", cfg.host));
-    let addr = (cfg.host.as_str(), cfg.port)
-        .to_socket_addrs()
-        .with_context(|| format!("cannot resolve {}", cfg.host))?
-        .next()
-        .ok_or_else(|| anyhow!("no address for {}", cfg.host))?;
-    stage(format!("Connecting to {addr}…"));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .with_context(|| format!("cannot reach {}:{}", cfg.host, cfg.port))?;
+    let mut stream = crate::dial::connect(&cfg.host, cfg.port, |a| stage(format!("Connecting to {a}…")))?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(45))).ok(); // handshake only
     let closer_stream = stream.try_clone()?;
