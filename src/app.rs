@@ -357,6 +357,13 @@ impl App {
                 break;
             }
         }));
+        // Closing the main window while spanning ends that connection, which closes the
+        // full-screen windows on the other monitors too.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = this.update(cx, |a, cx| a.end_span(window, cx));
+            true
+        });
         app
     }
 
@@ -1867,6 +1874,20 @@ impl App {
         let s = self.active_session()?;
         let t = s.tiles.iter().find(|t| t.monitor == m)?;
         Some((t.image.clone(), t.size, s.scaling, s.span_pans.get(m).copied().unwrap_or_default()))
+    }
+
+    /// Closing any window of "Span all local monitors" (the main one or one on another
+    /// monitor) ends the connection it shows, and with it the windows on every monitor.
+    /// `window` is the main window.
+    pub fn end_span(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.span && self.span_windows.is_empty() {
+            return;
+        }
+        if let Some(id) = self.st.active.clone() {
+            self.close_session(&id, window, cx);
+        }
+        self.span = false;
+        self.sync_span_windows(window, cx);
     }
 
     /// Open or close the extra full-screen windows that "Span all local monitors" needs.
