@@ -12,7 +12,7 @@ Run the installer, follow the prompts, and open **SeeMyMac** from the Start menu
 
 ### macOS
 
-Use `SeeMyMac-<version>-macOS.dmg` (or the `.zip`): drag **SeeMyMac** into the Applications folder inside your own home folder (`~/Applications`; create it if it is not there). The app is signed and notarized, and it lives in your user profile, so it updates itself without asking for a password. To build, sign and notarize it yourself, see `packaging/macos/build_app.sh`.
+Open `SeeMyMac-<version>-macOS.pkg` and follow the installer: it shows the licence for you to accept, then installs **SeeMyMac** into the Applications folder inside your own home folder (`~/Applications`) without asking for an administrator password. (The `.zip` holds the same app if you would rather drag it there yourself.) The app and installer are signed and notarized, and because the app lives in your user profile it updates itself without asking for a password. To build, sign and notarize it yourself, see `packaging/macos/build_app.sh`.
 
 ### Linux
 

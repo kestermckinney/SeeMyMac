@@ -39,12 +39,16 @@ pub struct Settings {
     pub capture_system_keys: bool,
     /// While zoomed in, pushing the pointer against a window edge scrolls the picture that way.
     pub edge_scroll: bool,
-    /// Look for a newer SeeMyMac at start-up (at most once a day) and offer to install it.
+    /// Look for a newer SeeMyMac at start-up and every few hours while running, and offer to
+    /// install it. "Check for updates" on the About screen works either way.
     pub check_updates: bool,
-    /// When the last automatic check ran (seconds since 1970).
+    /// When the last automatic check started (seconds since 1970), for the periodic check.
     pub last_update_check: u64,
     /// Where files fetched from the Mac are saved (`~` is this user's home).
     pub download_dir: String,
+    /// Show the toolbar (or its pull tab) inside the window. Only macOS may turn it off:
+    /// every command is also in the macOS menu bar there.
+    pub show_toolbar: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -63,6 +67,7 @@ impl Default for Settings {
             check_updates: true,
             last_update_check: 0,
             download_dir: "~/Downloads".into(),
+            show_toolbar: true,
             path: None,
         }
     }
@@ -117,6 +122,12 @@ impl Settings {
         c.start_in = self.default_start_in;
         c.scaling = self.default_scaling;
         c.virtual_display = self.default_virtual_display;
+    }
+
+    /// Whether the in-window toolbar (or its pull tab) is drawn. Always on where there is
+    /// no global menu bar to reach the commands from instead.
+    pub fn toolbar_shown(&self) -> bool {
+        self.show_toolbar || !cfg!(target_os = "macos")
     }
 
     /// Which modifier keys to send to the Mac, given the local state: (Control, Command).

@@ -1,6 +1,6 @@
 [package]
 name = "see_my_mac"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 default-run = "see_my_mac"

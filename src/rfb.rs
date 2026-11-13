@@ -7,11 +7,11 @@
 
 use crate::hp::{clipboard, filecopy};
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use md5::{Digest, Md5};
 use num_bigint::{BigUint, RandBigInt};
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream};
 use std::sync::mpsc::{channel, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,6 +23,16 @@ const ENC_DESKTOP_SIZE: i32 = -223;
 const ENC_EXT_DESKTOP_SIZE: i32 = -308;
 /// Refuse absurd framebuffers from a misbehaving server (~64k x 64k pixels).
 const MAX_PIXELS: u64 = 1 << 28;
+
+/// Marks a disconnect reason meaning the server turned the user name or password down (or needs
+/// one). Every transport (VNC, Apple High Performance, RDP) uses it so the app offers the sign-in
+/// dialog again, where the rest of the reason is shown.
+pub const LOGIN_REJECTED: &str = "Sign-in was rejected";
+
+/// Whether a disconnect reason means the user should be asked for a new user name and password.
+pub fn wants_login(reason: &str) -> bool {
+    reason.contains(LOGIN_REJECTED)
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -304,14 +314,7 @@ fn run(
         events.send(Event::Stage(t)).ok();
     };
     stage(format!("Looking up {}…", cfg.host));
-    let addr = (cfg.host.as_str(), cfg.port)
-        .to_socket_addrs()
-        .with_context(|| format!("cannot resolve {}", cfg.host))?
-        .next()
-        .ok_or_else(|| anyhow!("no address for {}", cfg.host))?;
-    stage(format!("Connecting to {addr}…"));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .with_context(|| format!("cannot reach {}:{}", cfg.host, cfg.port))?;
+    let mut stream = crate::dial::connect(&cfg.host, cfg.port, |a| stage(format!("Connecting to {a}…")))?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(45))).ok(); // handshake only
     let closer_stream = stream.try_clone()?;
@@ -464,7 +467,7 @@ pub fn handshake<S: Read + Write>(s: &mut S, user: &str, password: &str, stage: 
     } else if types.contains(&1) {
         1
     } else if types.contains(&30) || types.contains(&2) {
-        bail!("this server requires a password");
+        bail!("{LOGIN_REJECTED}: this computer needs a password.");
     } else {
         bail!("no supported login method (the server offered security types {types:?}; this client supports 1, 2 and 30)");
     };
@@ -488,7 +491,12 @@ pub fn handshake<S: Read + Write>(s: &mut S, user: &str, password: &str, stage: 
         let status = rd_u32(s)?;
         if status != 0 {
             let reason = if minor >= 8 { read_reason(s) } else { String::new() };
-            bail!("authentication failed{}", if reason.is_empty() { String::new() } else { format!(": {reason}") });
+            log::warn!("login refused (security type {chosen}, status {status}): {reason:?}");
+            let why = if chosen == 30 { "the user name or password is incorrect" } else { "the password is incorrect" };
+            match reason.trim() {
+                "" => bail!("{LOGIN_REJECTED}: {why}."),
+                r => bail!("{LOGIN_REJECTED}: {why} (the computer said “{r}”)."),
+            }
         }
     }
 
@@ -1264,7 +1272,8 @@ mod tests {
         });
         let h = connect(Config { host: "127.0.0.1".into(), port, username: String::new(), password: "x".into() });
         let Event::Disconnected(Some(reason)) = wait_event(&h, |e| matches!(e, Event::Disconnected(_))) else { panic!() };
-        assert!(reason.contains("authentication failed") && reason.contains("Bad password"), "{reason}");
+        assert!(reason.starts_with(LOGIN_REJECTED) && reason.contains("password is incorrect") && reason.contains("Bad password"), "{reason}");
+        assert!(wants_login(&reason));
         srv.join().unwrap();
     }
 
@@ -1290,7 +1299,7 @@ mod tests {
             }
         }
         let err = handshake(&mut Rw(&mut c, vec![]), "", "", &mut |_| {}).unwrap_err().to_string();
-        assert!(err.contains("requires a password"), "{err}");
+        assert!(wants_login(&err) && err.contains("needs a password"), "{err}");
     }
 
     #[test]

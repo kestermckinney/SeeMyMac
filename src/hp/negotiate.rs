@@ -259,8 +259,8 @@ fn open_and_auth(p: &Params) -> Result<(Tcp, [u8; 16])> {
             Err(e) => return Err(e),
         }
     }
-    let e = last.unwrap();
-    Err(anyhow!("Mac authentication failed: check the macOS user name and password, and that this user may use Screen Sharing ({e})."))
+    log::warn!("Mac authentication failed with both methods: {}", last.unwrap());
+    Err(anyhow!("{}: the macOS user name or password is incorrect, or this user is not allowed to use Screen Sharing.", crate::rfb::LOGIN_REJECTED))
 }
 
 fn client_init(t: &mut Tcp) -> Result<(u32, u32)> {

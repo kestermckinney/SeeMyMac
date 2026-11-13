@@ -3,7 +3,7 @@
 
   GITLAB_TOKEN=<personal access token with api scope> \\
     packaging/gitlab/upload-installer.py v0.2.0 target/macos/SeeMyMac-0.2.0-macOS.zip \\
-    target/macos/SeeMyMac-0.2.0-macOS.dmg target/installers/SeeMyMac-0.2.0-setup.exe
+    target/macos/SeeMyMac-0.2.0-macOS.pkg target/installers/SeeMyMac-0.2.0-setup.exe
 
 Each file is uploaded to the project's generic package registry and linked from the release
 (replacing a link of the same name). The release must already exist; the tag pipeline creates it

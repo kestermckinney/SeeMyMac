@@ -27,6 +27,12 @@ UninstallDisplayIcon={app}\see_my_mac.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; Branding in SeeMyMac's colours (regenerate with packaging/art/render.sh). Setup picks the size
+; that best fits the display scaling.
+WizardImageFile=wizard-100.bmp,wizard-150.bmp,wizard-200.bmp
+WizardSmallImageFile=wizard-small-100.bmp,wizard-small-150.bmp,wizard-small-200.bmp
+; Shown before installing; the user must accept it to continue.
+LicenseFile=..\..\LICENSE
 ; x86compatible: any PC that runs x86 programs (x86, x64 and ARM64 Windows).
 ArchitecturesAllowed=x86compatible
 ArchitecturesInstallIn64BitMode=arm64
