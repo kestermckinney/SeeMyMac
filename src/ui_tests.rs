@@ -910,6 +910,44 @@ fn command_key_setting_swaps_modifiers_sent_to_the_mac(cx: &mut TestAppContext) 
     assert!(!seen.windows(8).any(|w| w == [4, 1, 0, 0, 0, 0, 0xff, 0xe3]), "and not as Control");
 }
 
+#[gpui::test]
+fn cmd_space_combo_reaches_the_mac_as_command_space(cx: &mut TestAppContext) {
+    let (port, rx) = fake_mac(32, 18, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected", |a| a.sessions["c1"].status == Status::Connected);
+    let i = crate::app::KEY_COMBOS.iter().position(|c| c.label.starts_with("Cmd+Space")).expect("Cmd+Space is offered");
+    view.update(cx, |a, _| a.send_key_combo(i));
+    // KeyEvent (4): Command down, Space down, Space up, Command up.
+    let want: [[u8; 8]; 4] = [[4, 1, 0, 0, 0, 0, 0xff, 0xeb], [4, 1, 0, 0, 0, 0, 0, 0x20], [4, 0, 0, 0, 0, 0, 0, 0x20], [4, 0, 0, 0, 0, 0, 0xff, 0xeb]];
+    let end = Instant::now() + Duration::from_secs(5);
+    let mut seen = vec![];
+    while Instant::now() < end && !want.iter().all(|w| seen.windows(8).any(|s| s == w)) {
+        if let Ok(v) = rx.recv_timeout(Duration::from_millis(100)) {
+            seen = v;
+        }
+    }
+    let pos = |w: &[u8; 8]| seen.windows(8).position(|s| s == w);
+    let order: Vec<_> = want.iter().map(pos).collect();
+    assert!(order.iter().all(Option::is_some), "all four key events sent: {seen:?}");
+    assert!(order.windows(2).all(|p| p[0] < p[1]), "in order: {order:?}");
+}
+
+#[gpui::test]
+fn turning_the_toolbar_off_gives_its_room_to_the_remote_screen(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(None), None, window, cx));
+    draw(cx);
+    let with_bar = view.read_with(cx, |a, _| a.area.get().origin.y);
+    view.update(cx, |a, _| a.settings.show_toolbar = false);
+    draw(cx);
+    let without = view.read_with(cx, |a, _| a.area.get().origin.y);
+    if cfg!(target_os = "macos") {
+        assert_eq!(f32::from(with_bar - without), crate::view::TOOLBAR_H, "the toolbar's height goes to the remote screen");
+    } else {
+        assert_eq!(with_bar, without, "only macOS, with its menu bar, can hide the toolbar");
+    }
+}
+
 /// Live check against a real Mac, through the real UI code (not run by default):
 ///
 ///   SEEMYMAC_LIVE=c4 SEEMYMAC_LIVE_STEPS="snap:a;click:1325,1455;wait:2;snap:b" \

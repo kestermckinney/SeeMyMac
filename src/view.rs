@@ -1177,8 +1177,11 @@ impl App {
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Remote area = window minus the chrome that is currently visible.
+        crate::menus::refresh(self, cx);
+        // On macOS the toolbar can be turned off in favour of the menu bar.
+        let bar = self.settings.toolbar_shown();
         let vp = window.viewport_size();
-        let top = if self.st.full || NATIVE_FRAME { 0.0 } else { TITLE_H } + if self.st.pinned { TOOLBAR_H } else { 0.0 };
+        let top = if self.st.full || NATIVE_FRAME { 0.0 } else { TITLE_H } + if self.st.pinned && bar { TOOLBAR_H } else { 0.0 };
         self.area.set(Bounds::new(point(px(0.0), px(top)), size(vp.width, (vp.height - px(top)).max(px(0.0)))));
 
         let corner = if NATIVE_FRAME || self.st.full || window.is_maximized() { 0.0 } else { 10.0 };
@@ -1229,7 +1232,7 @@ impl Render for App {
                 }
             }))
             .child(content)
-            .when(!self.st.pinned, |d| d.child(self.pull_tab(cx)))
+            .when(!self.st.pinned && bar, |d| d.child(self.pull_tab(cx)))
             .when_some(self.active_session().and_then(|s| s.file_note.as_ref()), |d, n| d.child(Self::file_note(n, cx)))
             .when(view == View::Idle && self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| d.child(self.virtual_banner(cx)))
             .when(view == View::Menu, |d| {
@@ -1267,7 +1270,7 @@ impl Render for App {
             .on_key_up(cx.listener(|this, ev: &KeyUpEvent, window, cx| this.on_key_up(ev, window, cx)))
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, window, cx| this.on_modifiers(ev, window, cx)))
             .when(!self.st.full && !NATIVE_FRAME, |d| d.child(self.title_bar(cx)))
-            .when(self.st.pinned, |d| d.child(self.toolbar(cx)))
+            .when(self.st.pinned && bar, |d| d.child(self.toolbar(cx)))
             .child(area)
             .when(!NATIVE_FRAME && !self.st.full && !window.is_maximized(), |d| d.child(self.resize_handles()))
             .when(cfg!(windows), |d| {

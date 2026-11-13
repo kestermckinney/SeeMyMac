@@ -45,6 +45,9 @@ pub struct Settings {
     pub last_update_check: u64,
     /// Where files fetched from the Mac are saved (`~` is this user's home).
     pub download_dir: String,
+    /// Show the toolbar (or its pull tab) inside the window. Only macOS may turn it off:
+    /// every command is also in the macOS menu bar there.
+    pub show_toolbar: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -63,6 +66,7 @@ impl Default for Settings {
             check_updates: true,
             last_update_check: 0,
             download_dir: "~/Downloads".into(),
+            show_toolbar: true,
             path: None,
         }
     }
@@ -117,6 +121,12 @@ impl Settings {
         c.start_in = self.default_start_in;
         c.scaling = self.default_scaling;
         c.virtual_display = self.default_virtual_display;
+    }
+
+    /// Whether the in-window toolbar (or its pull tab) is drawn. Always on where there is
+    /// no global menu bar to reach the commands from instead.
+    pub fn toolbar_shown(&self) -> bool {
+        self.show_toolbar || !cfg!(target_os = "macos")
     }
 
     /// Which modifier keys to send to the Mac, given the local state: (Control, Command).

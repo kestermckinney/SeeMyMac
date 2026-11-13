@@ -271,6 +271,8 @@ pub const KEY_COMBOS: &[KeyCombo] = &[
     KeyCombo { label: "Alt+F4", mods: &[rfb::KEYSYM_ALT], key: 0xffc1 },
     KeyCombo { label: "Alt+Esc", mods: &[rfb::KEYSYM_ALT], key: 0xff1b },
     KeyCombo { label: "Win / Super", mods: &[], key: rfb::KEYSYM_SUPER },
+    // Super is the Mac's Command key; this Mac's own Spotlight takes Cmd+Space when typed here.
+    KeyCombo { label: "Cmd+Space (Spotlight)", mods: &[rfb::KEYSYM_SUPER], key: 0x20 },
     KeyCombo { label: "Win+D (show desktop)", mods: &[rfb::KEYSYM_SUPER], key: 0x64 },
     KeyCombo { label: "Win+E (explorer)", mods: &[rfb::KEYSYM_SUPER], key: 0x65 },
     KeyCombo { label: "Win+L (lock)", mods: &[rfb::KEYSYM_SUPER], key: 0x6c },

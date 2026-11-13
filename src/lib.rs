@@ -5,6 +5,7 @@ pub mod dial;
 pub mod geometry;
 pub mod hp;
 pub mod inhibit;
+pub mod menus;
 pub mod model;
 pub mod rdp;
 pub mod rdp_gateway;

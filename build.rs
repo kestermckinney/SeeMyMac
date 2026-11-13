@@ -18,4 +18,27 @@ fn main() {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + (m <= 2) as i64;
     println!("cargo:rustc-env=SEEMYMAC_BUILD_TIME={y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC", rem / 3600, rem % 3600 / 60, rem % 60);
+    embed_macos_name();
+}
+
+/// Run outside an .app bundle (`cargo run`), macOS names the application menu after the
+/// executable, `see_my_mac`. An Info.plist embedded in the binary's `__TEXT,__info_plist`
+/// section gives it the bundle's name instead. (The .app's own Info.plist takes precedence.)
+fn embed_macos_name() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo")).join("Info.plist");
+    let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>SeeMyMac</string>
+	<key>CFBundleDisplayName</key><string>SeeMyMac</string>
+</dict>
+</plist>
+"#;
+    std::fs::write(&out, plist).expect("write the embedded Info.plist");
+    println!("cargo:rustc-link-arg-bin=see_my_mac=-Wl,-sectcreate,__TEXT,__info_plist,{}", out.display());
 }

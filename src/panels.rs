@@ -220,6 +220,11 @@ impl App {
                     .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Sessions start on the Mac's own screen. Keep that screen to view existing windows. Use virtual display (Ctrl+Alt+V) switches to a separate display, which may start with an empty desktop."))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Files"))
                     .child(form_row("Save files from the Mac in", self.text_field("s-download", Field::Download, &st.download_dir, "~/Downloads", false, cx).into_any_element()))
+                    .when(cfg!(target_os = "macos"), |d| {
+                        d.child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Menus"))
+                            .child(self.settings_check("s-toolbar", "Show the toolbar in the window", st.show_toolbar, |s, v| s.show_toolbar = v, cx))
+                            .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Every command is also in the macOS menu bar. Turn the toolbar off to use only the menu bar; in full screen, move the pointer to the top of the screen to show it."))
+                    })
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Updates"))
                     .child(self.settings_check("s-updates", "Check for a new version when SeeMyMac starts", st.check_updates, |s, v| s.check_updates = v, cx))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Connections"))
