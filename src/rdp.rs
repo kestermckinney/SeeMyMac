@@ -443,8 +443,40 @@ fn dial(
     let upgraded = ironrdp_blocking::mark_as_upgraded(should_upgrade, &mut conn);
     let mut framed = Framed::new(tls);
     stage(ev, "Signing in…");
-    let outcome = ironrdp_blocking::connect_finalize(upgraded, conn, &mut framed, &mut Kdc, host.to_string().into(), server_key, kerberos).map_err(|e| anyhow!("sign-in failed: {e}"))?;
+    let outcome = ironrdp_blocking::connect_finalize(upgraded, conn, &mut framed, &mut Kdc, host.to_string().into(), server_key, kerberos).map_err(|e| sign_in_error(host, &e))?;
     Ok((outcome, framed))
+}
+
+/// Turn a failed CredSSP/NLA sign-in into a sentence a person can act on. When the server turned
+/// the account down, the text starts with [`crate::rfb::LOGIN_REJECTED`] so the app asks for a
+/// user name and password again instead of showing the raw SSPI error.
+fn sign_in_error(host: &str, e: &connector::ConnectorError) -> anyhow::Error {
+    use connector::sspi::{credssp::NStatusCode as S, ErrorKind as K};
+    let detail = match e.kind() {
+        connector::ConnectorErrorKind::Credssp(s) => s.to_string(),
+        k => k.to_string(),
+    };
+    log::warn!("{host}: sign-in failed: {e} ({detail})");
+    let why = match e.kind() {
+        connector::ConnectorErrorKind::Credssp(s) => match (s.nstatus, &s.error_type) {
+            (Some(S::PASSWORD_EXPIRED | S::PASSWORD_MUST_CHANGE), _) => Some("the password has expired. Change it on the remote computer (or ask an administrator), then try again."),
+            (Some(S::ACCOUNT_LOCKED_OUT), _) => Some("the account is locked out after too many failed attempts."),
+            (Some(S::ACCOUNT_DISABLED), _) => Some("the account is disabled."),
+            (Some(S::ACCOUNT_RESTRICTION | S::INVALID_LOGON_HOURS | S::LOGON_NOT_GRANTED | S::LOGON_TYPE_NOT_GRANTED | S::CTX_LOGON_DISABLED), _) => {
+                Some("this account is not allowed to sign in remotely. It may need to be added to the Remote Desktop Users group.")
+            }
+            (Some(S::SMARTCARD_LOGON_REQUIRED), _) => Some("this account must sign in with a smart card."),
+            (Some(S::WRONG_PASSWORD | S::LOGON_FAILURE | S::NO_SUCH_USER | S::INVALID_ACCOUNT_NAME | S::ILL_FORMED_PASSWORD), _) => Some("the user name or password is incorrect."),
+            (_, K::LogonDenied | K::UnknownCredentials | K::NoCredentials | K::WrongCredentialHandle) => Some("the user name or password is incorrect."),
+            _ => None,
+        },
+        connector::ConnectorErrorKind::AccessDenied => Some("access was denied for this account."),
+        _ => None,
+    };
+    match why {
+        Some(why) => anyhow!("{}: {why}", crate::rfb::LOGIN_REJECTED),
+        None => anyhow!("Sign-in failed during network level authentication ({detail})."),
+    }
 }
 
 fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, inputs: Receiver<Input>, ev: &Sender<Event>) -> Result<()> {
@@ -1518,6 +1550,23 @@ fn redirection(cfg: &Config) -> Result<Option<RdpdrChannel>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rejected_credssp_sign_in_reads_as_a_login_problem() {
+        use connector::sspi::{credssp::NStatusCode, Error, ErrorKind};
+        let credssp = |e| connector::ConnectorError::new("CredSSP", connector::ConnectorErrorKind::Credssp(e));
+        let bad = sign_in_error("h", &credssp(Error::new_with_nstatus(ErrorKind::InvalidToken, "CredSSP server returned an error status", NStatusCode::LOGON_FAILURE))).to_string();
+        assert!(bad.starts_with(crate::rfb::LOGIN_REJECTED) && bad.contains("user name or password is incorrect"), "{bad}");
+        assert!(crate::rfb::wants_login(&bad));
+        let expired = sign_in_error("h", &credssp(Error::new_with_nstatus(ErrorKind::InvalidToken, "x", NStatusCode::PASSWORD_EXPIRED))).to_string();
+        assert!(expired.contains("expired") && crate::rfb::wants_login(&expired), "{expired}");
+        let denied = sign_in_error("h", &credssp(Error::new(ErrorKind::LogonDenied, "x"))).to_string();
+        assert!(crate::rfb::wants_login(&denied), "{denied}");
+        // Anything else is not a password problem and keeps its detail.
+        let other = sign_in_error("h", &credssp(Error::new(ErrorKind::InternalError, "boom"))).to_string();
+        assert!(!crate::rfb::wants_login(&other) && other.contains("boom"), "{other}");
+    }
+
     use super::*;
 
     #[test]

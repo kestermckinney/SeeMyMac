@@ -185,6 +185,9 @@ pub struct PwPrompt {
     pub user: String,
     pub pass: String,
     pub error: Option<String>,
+    /// "Save password in the credential vault" is ticked: the password is stored when it is
+    /// submitted (and the connection switches to the vault); unticked forgets a saved one.
+    pub save: bool,
 }
 
 pub struct App {
@@ -682,8 +685,7 @@ impl App {
                     Event::Disconnected(reason) => {
                         s.handle = None;
                         let reason = reason.unwrap_or_else(|| "The remote computer closed the connection.".into());
-                        let wants_login = reason.contains("requires a password") || reason.contains("authentication failed");
-                        if wants_login {
+                        if rfb::wants_login(&reason) {
                             s.status = Status::Failed(reason.clone());
                             prompt = Some((id.clone(), reason));
                         } else if s.ever_connected && conn.as_ref().map_or(false, |c| c.reconnect) && s.attempts < self.settings.max_reconnects {
@@ -859,7 +861,8 @@ impl App {
 
     pub fn show_password(&mut self, id: &str, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let user = self.sessions.get(id).map(|s| s.user.clone()).unwrap_or_default();
-        self.pw = Some(PwPrompt { conn_id: id.to_string(), user, pass: String::new(), error });
+        let save = self.store.get(id).map_or(false, |c| c.credentials == model::CredentialMode::Vault);
+        self.pw = Some(PwPrompt { conn_id: id.to_string(), user, pass: String::new(), error, save });
         self.st.set_view(View::Password);
         self.field_cursor = None;
         self.field_anchor = None;
@@ -875,15 +878,32 @@ impl App {
         self.field_anchor = None;
         self.field = Field::None;
         if let Some(c) = self.store.get_mut(&p.conn_id) {
+            let mut dirty = false;
             if c.user != p.user {
                 c.user = p.user.clone();
+                dirty = true;
+            }
+            // Ticking "Save password" moves an "Ask" connection to the vault; unticking it moves a
+            // vault connection back to asking and forgets what was saved.
+            let mode = match (p.save, c.credentials) {
+                (true, model::CredentialMode::Ask) => model::CredentialMode::Vault,
+                (false, model::CredentialMode::Vault) => model::CredentialMode::Ask,
+                (_, m) => m,
+            };
+            if mode != c.credentials {
+                c.credentials = mode;
+                dirty = true;
+            }
+            if dirty {
                 self.persist();
             }
         }
-        if self.store.get(&p.conn_id).map_or(false, |c| c.credentials == model::CredentialMode::Vault) && !p.pass.is_empty() {
+        if p.save && !p.pass.is_empty() {
             if let Err(e) = vault::set(&p.conn_id, &p.pass) {
                 log::warn!("could not save password to the vault: {e}");
             }
+        } else if !p.save {
+            vault::delete(&p.conn_id);
         }
         if let Some(s) = self.sessions.get_mut(&p.conn_id) {
             s.user = p.user;

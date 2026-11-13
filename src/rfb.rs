@@ -24,6 +24,15 @@ const ENC_EXT_DESKTOP_SIZE: i32 = -308;
 /// Refuse absurd framebuffers from a misbehaving server (~64k x 64k pixels).
 const MAX_PIXELS: u64 = 1 << 28;
 
+/// Start of a disconnect reason meaning the server turned the user name or password down (RDP's
+/// CredSSP/NLA). Any transport may use it so the app offers the sign-in dialog again.
+pub const LOGIN_REJECTED: &str = "Sign-in was rejected";
+
+/// Whether a disconnect reason means the user should be asked for a new user name and password.
+pub fn wants_login(reason: &str) -> bool {
+    reason.starts_with(LOGIN_REJECTED) || reason.contains("requires a password") || reason.contains("authentication failed")
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,

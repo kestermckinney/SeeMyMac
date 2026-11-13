@@ -691,7 +691,7 @@ impl App {
                             .gap(px(8.0))
                             .child(primary_btn("retry", "Try again").on_click(cx.listener(move |this, _, window, cx| {
                                 // Re-prompt for a login when the connection asks for one.
-                                let needs_login = this.sessions.get(&rid).map_or(false, |s| matches!(&s.status, Status::Failed(m) if m.contains("password") || m.contains("authentication")));
+                                let needs_login = this.sessions.get(&rid).map_or(false, |s| matches!(&s.status, Status::Failed(m) if crate::rfb::wants_login(m)));
                                 if needs_login {
                                     this.show_password(&rid, None, window, cx);
                                 } else {
@@ -1091,12 +1091,45 @@ impl App {
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
-                    .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(format!("Sign in to {host}")))
+                    .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(if p.error.is_some() { format!("Could not sign in to {host}") } else { format!("Sign in to {host}") }))
                     .children(p.error.clone().map(|e| div().text_color(rgb(DANGER)).child(e)))
+                    .children(p.error.as_ref().map(|_| div().text_size(px(12.0)).text_color(rgb(MUTED)).child("Enter a different user name or password to try again.")))
                     .child(label_text("User name (Apple Screen Sharing needs one)"))
                     .child(self.text_field("pw-user", Field::PwUser, &p.user, "User name", false, cx))
                     .child(label_text("Password"))
                     .child(self.text_field("pw-pass", Field::PwPass, &p.pass, "Password", true, cx))
+                    .child(
+                        div()
+                            .id("pw-save")
+                            .debug_selector(|| "pw-save".into())
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .mt(px(4.0))
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .size(px(16.0))
+                                    .flex_none()
+                                    .rounded(px(4.0))
+                                    .border_1()
+                                    .border_color(rgb(if p.save { ACCENT } else { BORDER }))
+                                    .bg(rgb(if p.save { ACCENT } else { SURFACE }))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(TEXT))
+                                    .when(p.save, |d| d.child("✓")),
+                            )
+                            .child(div().child("Save password in the credential vault"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(p) = &mut this.pw {
+                                    p.save = !p.save;
+                                }
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .flex()

@@ -772,6 +772,47 @@ fn every_overlay_is_painted_with_a_real_size(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("switcher").is_some(), "switcher was not painted");
 }
 
+/// A server that turns the password down brings the sign-in dialog back (not a raw error), and a
+/// new password typed there with "Save password" ticked lands in the vault.
+#[gpui::test]
+fn rejected_login_asks_again_and_saves_the_new_password(cx: &mut TestAppContext) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        s.write_all(b"RFB 003.008\n").unwrap();
+        s.read_exact(&mut [0u8; 12]).unwrap();
+        s.write_all(&[1, 2]).unwrap();
+        s.read_exact(&mut [0u8; 1]).unwrap();
+        s.write_all(&[0; 16]).unwrap();
+        s.read_exact(&mut [0u8; 16]).unwrap();
+        s.write_all(&1u32.to_be_bytes()).unwrap();
+        s.write_all(&12u32.to_be_bytes()).unwrap();
+        s.write_all(b"Bad password").unwrap();
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    crate::vault::delete("c1");
+    cx.update(|window, cx| view.update(cx, |a, cx| a.open_connection("c1", window, cx)));
+    draw(cx);
+    cx.simulate_input("wrong");
+    cx.simulate_keystrokes("enter");
+    tick_until(cx, &view, "the sign-in dialog again", |a| a.st.view == View::Password && a.pw.as_ref().map_or(false, |p| p.error.is_some()));
+    view.read_with(cx, |a, _| {
+        let p = a.pw.as_ref().unwrap();
+        assert!(p.error.as_deref().unwrap().contains("Bad password"), "{:?}", p.error);
+        assert!(!p.save, "an \"Ask\" connection starts unticked");
+    });
+    draw(cx);
+    let save = cx.debug_bounds("pw-save").expect("save checkbox painted").center();
+    cx.simulate_click(save, gpui::Modifiers::none());
+    assert!(view.read_with(cx, |a, _| a.pw.as_ref().unwrap().save));
+    cx.simulate_input("right");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(crate::vault::get("c1").unwrap().as_deref(), Some("right"));
+    assert_eq!(view.read_with(cx, |a, _| a.store.get("c1").unwrap().credentials), CredentialMode::Vault);
+    crate::vault::delete("c1");
+}
+
 // ----- connection manager -----------------------------------------------------------
 
 #[gpui::test]
