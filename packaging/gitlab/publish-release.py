@@ -40,10 +40,23 @@ if publish:
         if not release.get('upcoming_release', False) and version(release['tag_name']) > version(tag):
             raise SystemExit('A newer release is already published; refusing to downgrade the repository')
 
+# Built by the flatpak-release, windows-installer and macos-installer jobs. src/update.rs finds
+# the Windows and macOS downloads by these names.
+ver = tag.removeprefix('v')
+assets = [Path('packaging/linux') / n for n in ['SeeMyMac.flatpak', 'seemymac.flatpakrepo', 'seemymac.gpg']] + [
+    Path('target/installers') / f'SeeMyMac-{ver}-setup.exe',
+    Path('target/macos') / f'SeeMyMac-{ver}-macOS.zip',
+    Path('target/macos') / f'SeeMyMac-{ver}-macOS.pkg',
+]
+if not publish:
+    missing = [str(p) for p in assets if not p.is_file()]
+    if missing:
+        raise SystemExit('Missing build outputs: ' + ', '.join(missing))
+
 links = []
-for name in ['SeeMyMac.flatpak', 'seemymac.flatpakrepo', 'seemymac.gpg']:
-    path = Path('packaging/linux') / name
-    endpoint = f'/packages/generic/seemymac/{quote(tag, safe="")}/{name}'
+for path in assets:
+    name = path.name
+    endpoint = f'/packages/generic/seemymac/{quote(tag, safe="")}/{quote(name)}'
     if not publish:
         request(endpoint, 'PUT', path.read_bytes(), 'application/octet-stream')
     links.append({'name': name, 'url': api + endpoint,
@@ -68,4 +81,4 @@ for link in links:
     if match:
         endpoint += '/' + str(match['id'])
     request(endpoint, 'PUT' if match else 'POST', json.dumps(link).encode())
-print(f'{"Published" if publish else "Prepared upcoming release"} {tag} with Flatpak assets')
+print(f'{"Published" if publish else "Prepared upcoming release"} {tag} with ' + ', '.join(p.name for p in assets))

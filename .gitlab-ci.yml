@@ -21,10 +21,45 @@ flatpak-release:
       - packaging/linux/seemymac.flatpakrepo
     expire_in: 1 week
 
+# One installer for ARM64 and x86 PCs, on GitLab's hosted Windows runners.
+windows-installer:
+  stage: build
+  tags: [saas-windows-medium-amd64]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File packaging/gitlab/build-windows.ps1
+  artifacts:
+    paths:
+      - target/installers/SeeMyMac-*-setup.exe
+    expire_in: 1 week
+
+# Signed and notarized universal app and installer, on the maintainer's own Mac (a
+# self-managed shell runner tagged "macos"; see packaging/gitlab/RELEASING-INSTALLERS.md).
+# Signing uses that Mac's keychain, so no Apple credentials are stored in GitLab.
+macos-installer:
+  stage: build
+  tags: [macos]
+  resource_group: macos-signing
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+    - version="$(sed -n 's/^version = "\([0-9.]*\)"/\1/p' Cargo.toml | head -n1)"
+    - '[ "$CI_COMMIT_TAG" = "v$version" ] || { echo "Tag does not match Cargo.toml version $version"; exit 1; }'
+    # Only needed when the runner runs while you are logged out (the login keychain is locked).
+    - 'if [ -n "${MACOS_KEYCHAIN_PASSWORD:-}" ]; then security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" login.keychain-db; fi'
+    - bash packaging/macos/build_app.sh --all
+  artifacts:
+    paths:
+      - target/macos/SeeMyMac-*-macOS.zip
+      - target/macos/SeeMyMac-*-macOS.pkg
+    expire_in: 1 week
+
 prepare-release:
   stage: prepare
   image: python:3.14-alpine
-  needs: [flatpak-release]
+  needs: [flatpak-release, windows-installer, macos-installer]
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
   script:
