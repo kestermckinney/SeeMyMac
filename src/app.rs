@@ -2312,12 +2312,12 @@ fn local_displays(cx: &gpui::App) -> Vec<(DisplayId, rdp::MonitorRect)> {
         .iter()
         .map(|d| {
             let b = d.bounds();
-            let mut r = rdp::MonitorRect { x: f32::from(b.origin.x) as i32, y: f32::from(b.origin.y) as i32, w: f32::from(b.size.width) as u32, h: f32::from(b.size.height) as u32 };
+            let r = rdp::MonitorRect { x: f32::from(b.origin.x) as i32, y: f32::from(b.origin.y) as i32, w: f32::from(b.size.width) as u32, h: f32::from(b.size.height) as u32 };
             #[cfg(target_os = "macos")]
-            {
+            let r = {
                 let g = core_graphics::display::CGDisplay::new(u32::from(d.id())).bounds();
-                (r.x, r.y) = (g.origin.x as i32, g.origin.y as i32);
-            }
+                rdp::MonitorRect { x: g.origin.x as i32, y: g.origin.y as i32, ..r }
+            };
             (d.id(), r)
         })
         .collect();
