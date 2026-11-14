@@ -49,7 +49,10 @@ credentials go into GitLab.
 Nothing to set up: `windows-installer` uses GitLab's hosted Windows runners.
 `packaging/gitlab/build-windows.ps1` installs Inno Setup, NASM, LLVM, the ARM64
 C++ tools and Rust on each run, then calls `tools/build-installers.ps1`. That
-takes a while (expect 30–60 minutes). The installer is unsigned, as it is for local builds.
+takes about 1 hour 40 minutes (each of the two optimized builds takes about 45), so
+the job allows 3 hours and the project's CI/CD job timeout must be at least that
+(Settings → CI/CD → General pipelines → Timeout; it is set to 3h). The installer
+is unsigned, as it is for local builds.
 
 ## Fallback
 
