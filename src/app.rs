@@ -1233,7 +1233,7 @@ impl App {
     /// Whether SeeMyMac looks for updates by itself. Off when the user turned it off in Settings,
     /// and on Linux, where Flatpak is updated by the software manager.
     fn auto_updates_on(&self) -> bool {
-        !cfg!(target_os = "linux") && self.settings.check_updates
+        crate::update::ENABLED && self.settings.check_updates
     }
 
     /// At start-up: look for an update quietly, when the setting allows.
@@ -1265,7 +1265,7 @@ impl App {
     /// Ask GitLab for the latest release on a background thread. `manual`: the user asked, so
     /// the answer is always shown; otherwise only a newer version is mentioned.
     pub fn start_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
-        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing) {
+        if !crate::update::ENABLED || matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing) {
             return;
         }
         self.update = UpdateStatus::Checking;

@@ -190,7 +190,8 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
 
 /// With "Check for updates automatically" on, a running SeeMyMac looks again once the interval
 /// has passed; a version found during a remote session waits until the user is back on the start
-/// screen. Turned off, it never looks by itself.
+/// screen. Turned off, it never looks by itself. (Linux builds never check.)
+#[cfg(not(target_os = "linux"))]
 #[gpui::test]
 fn updates_are_checked_periodically_without_interrupting_a_session(cx: &mut TestAppContext) {
     let (port, _rx) = fake_mac(32, 18, false);

@@ -1,8 +1,8 @@
 //! Self-update: asks GitLab for the latest release, downloads the installer for this
 //! platform and starts it. Windows runs the Inno Setup installer silently (it waits for
 //! this process to exit, then relaunches the app); macOS replaces the app bundle with the
-//! downloaded one from a helper script that waits for this process. Flatpak (Linux) is
-//! updated by the software manager, so there the check only says that a version is out.
+//! downloaded one from a helper script that waits for this process. Linux builds never check:
+//! SeeMyMac is distributed there as a Flatpak, which the software manager keeps up to date.
 //!
 //! Everything here is blocking and meant for a background thread; `app.rs` polls the result.
 
@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const RELEASE_URL: &str = "https://gitlab.com/api/v4/projects/kestermckinney%2FSeeMyMac/releases/permalink/latest";
 const USER_AGENT: &str = concat!("SeeMyMac-Updater/", env!("CARGO_PKG_VERSION"));
+
+/// Whether this build looks for updates at all. Off on Linux, where Flatpak updates the app.
+pub const ENABLED: bool = !cfg!(target_os = "linux");
 
 /// A newer release with the installer for this platform.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,8 +29,8 @@ pub struct Release {
 pub enum CheckResult {
     UpToDate,
     Available(Release),
-    /// A newer version exists but cannot be installed from here (Flatpak, or no installer
-    /// published for this platform); the text tells the user what to do.
+    /// A newer version exists but cannot be installed from here (no installer published for
+    /// this platform); the text tells the user what to do.
     Manual(String),
     Failed(String),
 }
@@ -81,9 +84,6 @@ pub fn parse_release(json: &str, current: &str) -> CheckResult {
     if !is_newer(version, current) {
         return CheckResult::UpToDate;
     }
-    if cfg!(target_os = "linux") {
-        return CheckResult::Manual(format!("Version {version} is available. Update SeeMyMac through your software manager, or run: flatpak update io.gitlab.kestermckinney.SeeMyMac"));
-    }
     let links = v["assets"]["links"].as_array().cloned().unwrap_or_default();
     for link in &links {
         let url = link["direct_asset_url"].as_str().filter(|u| !u.is_empty()).or_else(|| link["url"].as_str()).unwrap_or("");
@@ -104,8 +104,11 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30))).user_agent(USER_AGENT).build().into()
 }
 
-/// Ask GitLab whether a newer release exists.
+/// Ask GitLab whether a newer release exists. Never contacts it when updates are not [`ENABLED`].
 pub fn check() -> CheckResult {
+    if !ENABLED {
+        return CheckResult::UpToDate;
+    }
     match agent().get(RELEASE_URL).header("Accept", "application/json").call() {
         Ok(mut r) => match r.body_mut().read_to_string() {
             Ok(body) => parse_release(&body, current_version()),
@@ -259,6 +262,7 @@ mod tests {
     }
 
     /// Talks to GitLab: `cargo test live_check -- --ignored`.
+    #[cfg(not(target_os = "linux"))]
     #[test]
     #[ignore]
     fn live_check_reaches_gitlab() {
@@ -309,7 +313,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_points_to_flatpak() {
-        assert!(matches!(parse_release(&release("v0.2.0", "", false), "0.1.4"), CheckResult::Manual(m) if m.contains("flatpak update")));
+    fn linux_never_checks() {
+        assert!(!ENABLED);
+        assert_eq!(check(), CheckResult::UpToDate);
     }
 }
