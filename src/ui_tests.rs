@@ -349,6 +349,50 @@ fn text_fields_select_replace_and_cut_unicode(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn find_computers_fills_in_the_host_name(cx: &mut TestAppContext) {
+    use crate::discover::{Discovery, Found, Kind, Source};
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));
+    view.update(cx, |a, _| {
+        a.discover_start = || {
+            Discovery::with_results(vec![
+                Found { fullname: "Studio._rfb._tcp.local.".into(), name: "Studio".into(), host: "studio.local".into(), ip: None, port: 5900, kind: Kind::Vnc, source: Source::Bonjour },
+                Found { fullname: "Den PC._rdp._tcp.local.".into(), name: "Den PC".into(), host: "den-pc.local".into(), ip: None, port: 3390, kind: Kind::Rdp, source: Source::Tailscale },
+            ])
+        }
+    });
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let b = cx.debug_bounds("btn-find-hosts").expect("search button beside the host field");
+    cx.simulate_click(b.center(), gpui::Modifiers::default());
+    draw(cx);
+    assert!(view.read_with(cx, |a, _| a.discover.is_some()));
+    let b = cx.debug_bounds("found-0").expect("first found computer listed");
+    cx.simulate_click(b.center(), gpui::Modifiers::default());
+    view.read_with(cx, |a, _| {
+        assert!(a.discover.is_none(), "picking closes the search");
+        assert_eq!(a.st.view, View::Dialog, "the connection dialog stays open");
+        let d = &a.form.as_ref().unwrap().draft;
+        assert_eq!(d.host, "studio.local");
+        assert_eq!(d.name, "Studio", "an empty display name takes the computer's name");
+    });
+
+    // Keyboard: down, Enter picks the RDP host, switching protocol and copying its odd port.
+    let b = cx.debug_bounds("btn-find-hosts").unwrap();
+    cx.simulate_click(b.center(), gpui::Modifiers::default());
+    cx.simulate_keystrokes("down enter");
+    view.read_with(cx, |a, _| {
+        let d = &a.form.as_ref().unwrap().draft;
+        assert_eq!((d.host.as_str(), d.proto, d.port.as_str(), d.name.as_str()), ("den-pc.local", Proto::Rdp, "3390", "Studio"));
+    });
+
+    // Escape closes only the search, not the dialog.
+    let b = cx.debug_bounds("btn-find-hosts").unwrap();
+    cx.simulate_click(b.center(), gpui::Modifiers::default());
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |a, _| assert!(a.discover.is_none() && a.st.view == View::Dialog));
+}
+
+#[gpui::test]
 fn protocol_change_updates_default_port(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| App::new(Store::load(None), None, window, cx));
     cx.simulate_keystrokes("ctrl-n");

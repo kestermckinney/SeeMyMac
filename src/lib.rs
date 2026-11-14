@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod dial;
+pub mod discover;
 pub mod geometry;
 pub mod hp;
 pub mod inhibit;

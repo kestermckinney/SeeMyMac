@@ -913,6 +913,101 @@ impl App {
             .child(div().id("switcher-inner").on_click(|_, _, cx| cx.stop_propagation()).child(cards))
     }
 
+    /// "Find computers": what Bonjour has found so far. Clicking one fills in the host name.
+    fn discovery_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(d) = &self.discover else { return div().into_any_element() };
+        let mut list = div().id("discover-list").flex().flex_col().h(px(300.0)).overflow_y_scroll().rounded(px(6.0)).border_1().border_color(rgb(BORDER)).bg(rgb(BG_CHROME));
+        for (i, f) in d.found.iter().enumerate() {
+            let sel = i == d.sel;
+            let addr = match f.ip {
+                Some(ip) if f.port != f.kind.default_port() => format!("{} · {ip} · port {}", f.host, f.port),
+                Some(ip) => format!("{} · {ip}", f.host),
+                None => f.host.clone(),
+            };
+            list = list.child(
+                div()
+                    .id(("found", i))
+                    .debug_selector(move || format!("found-{i}"))
+                    .min_h(px(48.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .cursor_pointer()
+                    .border_b_1()
+                    .border_color(rgb(DIVIDER))
+                    .when(sel, |r| r.bg(rgb(SELECTED)))
+                    .hover(|s| s.bg(rgb(SELECTED)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.pick_discovered(i, window, cx)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(f.name.clone())).child(div().truncate().text_size(px(12.0)).text_color(rgb(MUTED)).child(addr)))
+                    .child(div().flex_none().px(px(6.0)).py(px(1.0)).rounded(px(4.0)).border_1().border_color(rgb(BORDER)).text_size(px(11.0)).text_color(rgb(MUTED)).child(match f.source {
+                        crate::discover::Source::Bonjour => f.kind.label().to_string(),
+                        crate::discover::Source::Tailscale => format!("{} · Tailscale", f.kind.label()),
+                    })),
+            );
+        }
+        let searching = d.searching();
+        if d.found.is_empty() {
+            let msg = match &d.error {
+                Some(e) => e.clone(),
+                None if searching => "Searching…".into(),
+                None => "No computers found. Macs on this network appear when Screen Sharing or Remote Management is turned on in System Settings › General › Sharing. Computers on your tailnet appear when they accept VNC (port 5900) or Remote Desktop (port 3389).".into(),
+            };
+            list = list.child(div().p(px(16.0)).text_color(rgb(if d.error.is_some() { DANGER } else { MUTED })).child(msg));
+        }
+        let status = if d.error.is_some() || d.found.is_empty() {
+            String::new()
+        } else {
+            format!("{} found{}", d.found.len(), if searching { ", still searching…" } else { "" })
+        };
+
+        div()
+            .id("discover-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .bg(rgba(0x01040980))
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, window, cx| this.close_discovery(window, cx)))
+            .child(
+                div()
+                    .id("discover")
+                    .debug_selector(|| "discover".into())
+                    .w(px(520.0))
+                    .max_w_full()
+                    .rounded(px(12.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(div().px(px(20.0)).pt(px(16.0)).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child("Find computers"))
+                    .child(div().px(px(20.0)).pt(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Computers on this network or your Tailscale network offering Screen Sharing, VNC or Remote Desktop. Choose one to use its name."))
+                    .child(div().px(px(20.0)).py(px(12.0)).child(list))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(20.0))
+                            .py(px(14.0))
+                            .border_t_1()
+                            .border_color(rgb(DIVIDER))
+                            .child(div().flex_1().text_size(px(12.0)).text_color(rgb(MUTED)).child(status))
+                            .child(secondary_btn("discover-again", "Search again").on_click(cx.listener(|this, _, window, cx| this.open_discovery(window, cx))))
+                            .child(secondary_btn("discover-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.close_discovery(window, cx)))),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(form) = &self.form else { return div().into_any_element() };
         let d = &form.draft;
@@ -968,7 +1063,32 @@ impl App {
                     .flex_col()
                     .child(row("Display name", self.text_field("f-name", Field::Name, &d.name, "My Mac", false, cx).into_any_element()))
                     .child(row("Protocol", div().flex().child(segs).into_any_element()))
-                    .child(row("Host name or IP address", self.text_field("f-host", Field::Host, &d.host, "mac.local or 192.168.1.20", false, cx).into_any_element()))
+                    .child(row(
+                        "Host name or IP address",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(div().flex_1().min_w_0().child(self.text_field("f-host", Field::Host, &d.host, "mac.local or 192.168.1.20", false, cx)))
+                            .child(
+                                div()
+                                    .id("btn-find-hosts")
+                                    .debug_selector(|| "btn-find-hosts".into())
+                                    .size(px(32.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .hover(|s| s.bg(rgb(SELECTED)))
+                                    .on_click(cx.listener(|this, _, window, cx| this.open_discovery(window, cx)))
+                                    .child(svg().path("ui/search.svg").size(px(16.0)).text_color(rgb(TEXT))),
+                            )
+                            .into_any_element(),
+                    ))
                     .child(row("Port", self.text_field("f-port", Field::Port, &d.port, &d.proto.default_port().to_string(), false, cx).into_any_element()))
                     .child(row("User name", self.text_field("f-user", Field::User, &d.user, "Optional for VNC", false, cx).into_any_element()))
                     .when(d.proto == Proto::Rdp, |col| {
@@ -1278,6 +1398,7 @@ impl Render for App {
             .when(matches!(self.pick, Some("tb-keys") | Some("tb-scale")) && view == View::Idle, |d| d.child(self.toolbar_picker(cx)))
             .when(view == View::Switcher, |d| d.child(self.switcher(cx)))
             .when(view == View::Dialog, |d| d.child(self.dialog(cx)))
+            .when(view == View::Dialog && self.discover.is_some(), |d| d.child(self.discovery_panel(cx)))
             .when(view == View::Manage, |d| d.child(self.manage_panel(cx)))
             .when(view == View::Settings, |d| d.child(self.settings_panel(cx)))
             .when(view == View::About, |d| d.child(self.about_panel(cx)))
@@ -1386,6 +1507,7 @@ impl AssetSource for Assets {
             "ui/pin-off.svg" => Some(include_bytes!("../assets/ui/pin-off.svg").as_slice().into()),
             "ui/fullscreen.svg" => Some(include_bytes!("../assets/ui/fullscreen.svg").as_slice().into()),
             "ui/fullscreen-exit.svg" => Some(include_bytes!("../assets/ui/fullscreen-exit.svg").as_slice().into()),
+            "ui/search.svg" => Some(include_bytes!("../assets/ui/search.svg").as_slice().into()),
             _ => None,
         })
     }

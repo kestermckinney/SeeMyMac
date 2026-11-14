@@ -37,7 +37,7 @@ pub fn is_tailscale(ip: &IpAddr) -> bool {
 }
 
 /// Link-local IPv6 (fe80::/10) needs a scope id the resolver rarely supplies; it never routes.
-fn is_link_local_v6(ip: &IpAddr) -> bool {
+pub fn is_link_local_v6(ip: &IpAddr) -> bool {
     matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80)
 }
 
@@ -61,7 +61,7 @@ pub fn tailscale_lookup(host: &str, v4: bool) -> Option<IpAddr> {
     }
     let flag = if v4 { "-4" } else { "-6" };
     for exe in tailscale_cli() {
-        let Ok(out) = Command::new(exe).args(["ip", flag, host]).output() else { continue };
+        let Ok(out) = tailscale_command(exe).args(["ip", flag, host]).output() else { continue };
         if !out.status.success() {
             continue;
         }
@@ -72,7 +72,22 @@ pub fn tailscale_lookup(host: &str, v4: bool) -> Option<IpAddr> {
     None
 }
 
-fn tailscale_cli() -> &'static [&'static str] {
+/// A command running the Tailscale CLI at `exe`. On Windows it gets no console window: release
+/// builds have no console of their own, so one would otherwise flash up for each call.
+pub fn tailscale_command(exe: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut c = Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
+/// Where the Tailscale CLI may be, best guess first.
+pub fn tailscale_cli() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         &["tailscale", "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
     } else if cfg!(windows) {

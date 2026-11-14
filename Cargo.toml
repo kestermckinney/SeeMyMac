@@ -61,6 +61,8 @@ ironrdp-mstsgu = { version = "0.0.1", features = ["rustls"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "net", "io-util", "time"] }
 ironrdp-rail = "0.3"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+# Finds Screen Sharing/VNC and RDP hosts on the local network over Bonjour (src/discover.rs).
+mdns-sd = "0.21"
 
 # Passes system shortcuts (Super, Super+Space) to the Mac on Wayland (src/inhibit.rs).
 [target.'cfg(target_os = "linux")'.dependencies]

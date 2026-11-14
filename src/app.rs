@@ -236,6 +236,10 @@ pub struct App {
     pub(crate) field_anchor: Option<(Field, usize)>,
     pub quick: String,
     pub form: Option<Form>,
+    /// The "Find computers" search opened from the connection dialog's host field.
+    pub discover: Option<crate::discover::Discovery>,
+    /// Starts that search. Tests swap in a stub so they never reach the network.
+    pub discover_start: fn() -> crate::discover::Discovery,
     pub pw: Option<PwPrompt>,
     /// "Get file from Mac": the path typed so far and any complaint.
     pub get_file: Option<(String, Option<String>)>,
@@ -341,6 +345,8 @@ impl App {
             field_anchor: None,
             quick: String::new(),
             form: None,
+            discover: None,
+            discover_start: if cfg!(test) { || crate::discover::Discovery::with_results(vec![]) } else { crate::discover::Discovery::start },
             pw: None,
             get_file: None,
             font,
@@ -620,6 +626,9 @@ impl App {
         self.sync_clipboard(window, cx);
         self.periodic_update_check(cx);
         if self.poll_update(window, cx) {
+            cx.notify();
+        }
+        if self.discover.as_mut().map_or(false, |d| d.poll()) {
             cx.notify();
         }
         // Zoomed in with the pointer against a window edge: keep scrolling that way.
@@ -1016,6 +1025,9 @@ impl App {
             cx.notify();
             return;
         }
+        if self.discover.is_some() {
+            return self.close_discovery(window, cx);
+        }
         match self.st.view {
             View::Password => return self.cancel_password(window, cx),
             View::Update => return self.dismiss_update(window, cx),
@@ -1165,8 +1177,73 @@ impl App {
         cx.notify();
     }
 
+    /// Open the "Find computers" window over the connection dialog and start searching.
+    pub fn open_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.form.is_none() {
+            return;
+        }
+        self.pick = None;
+        self.discover = Some((self.discover_start)());
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Close the search window (stopping the search), back to the connection dialog.
+    pub fn close_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.discover = None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Use found computer `i`: its host name goes in the host field. The protocol follows the
+    /// service when it is plainly the other kind (an RDP host while VNC is chosen, or the other
+    /// way round), and a port other than the usual one is copied too.
+    pub fn pick_discovered(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(found) = self.discover.as_ref().and_then(|d| d.found.get(i)).cloned() else { return };
+        use crate::discover::Kind;
+        let proto = self.form.as_ref().map(|f| f.draft.proto);
+        match (found.kind, proto) {
+            (Kind::Rdp, Some(p)) if p != Proto::Rdp => self.set_protocol(Proto::Rdp),
+            (Kind::Vnc, Some(Proto::Rdp)) => self.set_protocol(Proto::Vnc),
+            _ => {}
+        }
+        if let Some(f) = &mut self.form {
+            f.draft.host = found.host.clone();
+            if found.port != 0 && found.port != found.kind.default_port() {
+                f.draft.port = found.port.to_string();
+            }
+            if f.draft.name.trim().is_empty() {
+                f.draft.name = found.name.clone();
+            }
+            f.error = None;
+        }
+        self.field_cursor = None;
+        self.field_anchor = None;
+        self.field = Field::Host;
+        self.close_discovery(window, cx);
+    }
+
+    fn handle_discovery_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = &mut self.discover else { return };
+        let n = d.found.len();
+        match key {
+            "escape" => return self.close_discovery(window, cx),
+            "enter" => {
+                let i = d.sel;
+                return self.pick_discovered(i, window, cx);
+            }
+            "up" if d.sel > 0 => d.sel -= 1,
+            "down" if d.sel + 1 < n => d.sel += 1,
+            "home" => d.sel = 0,
+            "end" => d.sel = n.saturating_sub(1),
+            _ => return,
+        }
+        cx.notify();
+    }
+
     /// Close the connection dialog, returning to the manager if that is where it came from.
     fn leave_dialog(&mut self) {
+        self.discover = None;
         self.form = None;
         let back = std::mem::replace(&mut self.dialog_return, View::Idle);
         self.st.set_view(back);
@@ -1543,6 +1620,9 @@ impl App {
     fn handle_overlay_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = k.modifiers;
+        if self.discover.is_some() {
+            return self.handle_discovery_key(&k.key, window, cx);
+        }
         match k.key.as_str() {
             "escape" => return self.close_overlay(window, cx),
             "tab" => {
