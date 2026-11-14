@@ -43,7 +43,7 @@ Source: "{#BinaryX86}"; DestDir: "{app}"; DestName: "see_my_mac.exe"; Check: not
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\SeeMyMac"; Filename: "{app}\see_my_mac.exe"
+Name: "{autoprograms}\SeeMyMac"; Filename: "{app}\see_my_mac.exe"; IconFilename: "{app}\see_my_mac.exe"
 
 [Run]
 Filename: "{app}\see_my_mac.exe"; Description: "Launch SeeMyMac"; Flags: nowait postinstall skipifsilent

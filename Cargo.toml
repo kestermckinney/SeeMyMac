@@ -126,3 +126,6 @@ path = "src/bin/ui_driver.rs"
 # 
 # [dependencies.wayland-protocols]
 # version = "0.30"
+
+[build-dependencies]
+embed-resource = "3"

@@ -1,0 +1,2 @@
+// Icon shown by Explorer, shortcuts, the taskbar and Alt+Tab. Compiled in by build.rs on Windows.
+1 ICON "../../assets/icons/seemac.ico"

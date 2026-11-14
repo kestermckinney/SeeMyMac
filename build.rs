@@ -19,6 +19,7 @@ fn main() {
     let y = yoe + era * 400 + (m <= 2) as i64;
     println!("cargo:rustc-env=SEEMYMAC_BUILD_TIME={y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC", rem / 3600, rem % 3600 / 60, rem % 60);
     embed_macos_name();
+    embed_windows_icon();
 }
 
 /// Run outside an .app bundle (`cargo run`), macOS names the application menu after the
@@ -41,4 +42,17 @@ fn embed_macos_name() {
 "#;
     std::fs::write(&out, plist).expect("write the embedded Info.plist");
     println!("cargo:rustc-link-arg-bin=see_my_mac=-Wl,-sectcreate,__TEXT,__info_plist,{}", out.display());
+}
+
+/// On Windows the executable carries its icon (`packaging/windows/seemymac.rc`), which Explorer,
+/// shortcuts and the taskbar read from the file itself.
+fn embed_windows_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=packaging/windows/seemymac.rc");
+    println!("cargo:rerun-if-changed=assets/icons/seemac.ico");
+    embed_resource::compile("packaging/windows/seemymac.rc", embed_resource::NONE)
+        .manifest_optional()
+        .expect("embed the Windows icon resource");
 }
