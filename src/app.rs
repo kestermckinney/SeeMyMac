@@ -1657,7 +1657,9 @@ impl App {
         match self.st.view {
             View::Idle => {
                 self.forward_key(ev, true);
-                if k.key_char.as_deref().map_or(false, |c| c.chars().any(|c| !c.is_control())) {
+                // On Windows, gpui gives Space no `key_char`, but the key still turns into a
+                // WM_CHAR ' ' if it is not consumed, and `type_text` would send it a second time.
+                if k.key == "space" || k.key_char.as_deref().map_or(false, |c| c.chars().any(|c| !c.is_control())) {
                     consume_typed_key(cx);
                 }
             }
