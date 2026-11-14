@@ -407,6 +407,46 @@ fn protocol_change_updates_default_port(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn pull_tab_slides_sideways_and_a_click_still_pins(cx: &mut TestAppContext) {
+    use gpui::{point, px, Modifiers, MouseButton};
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(None), None, window, cx));
+    view.update(cx, |a, _| a.st.pinned = false);
+    draw(cx);
+    let b = cx.debug_bounds("pulltab").expect("pull tab painted");
+
+    // Press and slide right: the tab follows and the toolbar stays unpinned.
+    let p = b.center();
+    cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    cx.simulate_mouse_move(point(p.x + px(60.0), p.y), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(point(p.x + px(60.0), p.y), MouseButton::Left, Modifiers::default());
+    draw(cx);
+    view.read_with(cx, |a, _| {
+        assert!(!a.st.pinned, "a slide must not pin the toolbar");
+        assert!(a.pull_drag.is_none());
+        assert_eq!(a.pull_offset, 60.0);
+    });
+    let moved = cx.debug_bounds("pulltab").unwrap();
+    assert_eq!(moved.left(), b.left() + px(60.0));
+
+    // Sliding far past the edge stops with the whole tab still on screen.
+    let p = moved.center();
+    cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    cx.simulate_mouse_move(point(px(1.0), p.y), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(point(px(1.0), p.y), MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert_eq!(cx.debug_bounds("pulltab").unwrap().left(), px(0.0));
+
+    // A plain click still pins the toolbar.
+    let p = cx.debug_bounds("pulltab").unwrap().center();
+    cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    cx.simulate_mouse_up(p, MouseButton::Left, Modifiers::default());
+    view.read_with(cx, |a, _| assert!(a.st.pinned, "a click on the pull tab pins the toolbar"));
+}
+
+#[gpui::test]
 fn connects_to_server_shows_frame_and_forwards_input(cx: &mut TestAppContext) {
     let (port, rx) = fake_mac(64, 36, false);
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));

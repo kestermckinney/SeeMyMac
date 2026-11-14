@@ -228,6 +228,14 @@ pub struct App {
     pub quit_requested: bool,
     pub window_drags: u32,
     pub corner_radius: f32,
+    /// How far the unpinned toolbar's pull tab has been slid from the centre (px), so the
+    /// remote screen's top edge under it can be reached.
+    pub pull_offset: f32,
+    /// A pull-tab press in progress: the pointer's starting x, the offset then, and whether it
+    /// has moved far enough to count as a slide rather than a click.
+    pub pull_drag: Option<(f32, f32, bool)>,
+    /// The pull tab's width at the last paint, to keep it on screen while sliding.
+    pub pull_width: Rc<Cell<f32>>,
     pub st: AppState,
     pub sessions: HashMap<String, Session>,
     pub focus: FocusHandle,
@@ -337,6 +345,9 @@ impl App {
             quit_requested: false,
             window_drags: 0,
             corner_radius: 0.0,
+            pull_offset: 0.0,
+            pull_drag: None,
+            pull_width: Rc::new(Cell::new(0.0)),
             st: AppState::new(),
             sessions: HashMap::new(),
             focus,

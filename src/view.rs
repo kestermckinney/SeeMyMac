@@ -560,9 +560,14 @@ impl App {
         let more = self.st.open.len().saturating_sub(1);
         let mon = self.st.active.as_deref().map(|a| self.st.monitor(a));
         let monitors = self.active_session().map_or(1, |s| s.monitors);
+        let width = self.pull_width.clone();
+        let sliding = self.pull_drag.is_some_and(|d| d.2);
         div().absolute().top_0().left_0().right_0().flex().justify_center().child(
             div()
                 .id("pulltab")
+                .debug_selector(|| "pulltab".into())
+                .relative()
+                .left(px(self.pull_offset()))
                 .h(px(PULL_H))
                 .px(px(12.0))
                 .flex()
@@ -574,13 +579,18 @@ impl App {
                 .border_t_0()
                 .border_color(rgb(BORDER))
                 .text_size(px(12.0))
-                .cursor_pointer()
+                .cursor(if sliding { CursorStyle::ClosedHand } else { CursorStyle::PointingHand })
                 .occlude()
                 .hover(|s| s.bg(rgb(SELECTED)))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.st.pinned = true;
+                // A click pins the toolbar; pressing and sliding moves the tab sideways so the
+                // remote screen under it can be used. Both finish in `pull_drag_overlay`.
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.pull_drag = Some((f32::from(ev.position.x), this.pull_offset(), false));
                     cx.notify();
                 }))
+                // Measures the tab (inside its 1px side borders, hence the + 2).
+                .child(canvas(move |b, _, _| width.set(f32::from(b.size.width) + 2.0), |_, _, _, _| ()).absolute().top_0().left_0().size_full())
                 .child(dot(color))
                 .child(name)
                 .child(div().text_color(rgb(MUTED)).child(status))
@@ -593,6 +603,47 @@ impl App {
                 })
                 .when(more > 0, |d| d.child(div().text_color(rgb(MUTED)).child(format!("+{more} more")))),
         )
+    }
+
+    /// The pull tab's offset from the centre, kept so the whole tab stays on screen.
+    pub(crate) fn pull_offset(&self) -> f32 {
+        let max = ((f32::from(self.area.get().size.width) - self.pull_width.get()) / 2.0).max(0.0);
+        self.pull_offset.clamp(-max, max)
+    }
+
+    /// Covers the remote area while the pull tab is pressed, so the pointer's moves slide the
+    /// tab instead of reaching the remote computer.
+    fn pull_drag_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("pulltab-drag")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .cursor(if self.pull_drag.is_some_and(|d| d.2) { CursorStyle::ClosedHand } else { CursorStyle::PointingHand })
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                let Some((x0, off0, moved)) = this.pull_drag else { return };
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    // Released outside the window.
+                    this.pull_drag = None;
+                } else {
+                    let dx = f32::from(ev.position.x) - x0;
+                    let moved = moved || dx.abs() > 4.0;
+                    this.pull_drag = Some((x0, off0, moved));
+                    if moved {
+                        this.pull_offset = off0 + dx;
+                        this.pull_offset = this.pull_offset();
+                    }
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                if let Some((_, _, false)) = this.pull_drag.take() {
+                    this.st.pinned = true;
+                }
+                cx.notify();
+            }))
     }
 
     // ----- remote area ------------------------------------------------------
@@ -1386,6 +1437,7 @@ impl Render for App {
             }))
             .child(content)
             .when(!self.st.pinned && bar, |d| d.child(self.pull_tab(cx)))
+            .when(!self.st.pinned && bar && self.pull_drag.is_some(), |d| d.child(self.pull_drag_overlay(cx)))
             .when_some(self.active_session().and_then(|s| s.file_note.as_ref()), |d, n| d.child(Self::file_note(n, cx)))
             .when(view == View::Idle && self.active_session().map_or(false, |s| s.status == Status::Connected && s.virtual_pending.is_some()), |d| d.child(self.virtual_banner(cx)))
             .when(view == View::Menu, |d| {
