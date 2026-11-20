@@ -169,6 +169,8 @@ pub enum Event {
     Connected { width: u32, height: u32, name: String },
     /// Connection ended; `Some(reason)` when it failed or was dropped.
     Disconnected(Option<String>),
+    /// The server ended the session. Reconnecting requires an explicit request.
+    SessionEnded(String),
     ServerClipboard(String),
     /// Apple only: a file or folder dropped onto the screen is being copied to the Mac.
     FileCopy(filecopy::Progress),

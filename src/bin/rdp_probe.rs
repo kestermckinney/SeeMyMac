@@ -102,6 +102,10 @@ fn main() {
                     println!("[{:>5} ms] DISCONNECTED {r:?}", t0.elapsed().as_millis());
                     disconnected = Some(r);
                 }
+                Event::SessionEnded(reason) => {
+                    println!("[{:>5} ms] SESSION ENDED {reason}", t0.elapsed().as_millis());
+                    disconnected = Some(Some(reason));
+                }
                 other => println!("[{:>5} ms] event: {other:?}", t0.elapsed().as_millis()),
             }
         }

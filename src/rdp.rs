@@ -124,15 +124,19 @@ pub fn connect(cfg: Config) -> Handle {
                 *closer.lock().unwrap() = Some(Box::new(move || st.store(true, Ordering::SeqCst)));
             }
             let result = run(&cfg, &fb, &stopping, in_rx, &ev_tx);
-            let reason = match result {
-                Err(e) if !stopping.load(Ordering::SeqCst) => {
-                    log::warn!("{}: RDP session failed: {e:#}", cfg.host);
-                    Some(format!("{e:#}"))
+            let event = if stopping.load(Ordering::SeqCst) {
+                Event::Disconnected(None)
+            } else {
+                match result {
+                    Ok(Some(reason)) => Event::SessionEnded(reason),
+                    Ok(None) => Event::Disconnected(None),
+                    Err(e) => {
+                        log::warn!("{}: RDP session failed: {e:#}", cfg.host);
+                        Event::Disconnected(Some(format!("{e:#}")))
+                    }
                 }
-                Ok(()) if !stopping.load(Ordering::SeqCst) => Some("The remote session ended.".to_string()),
-                _ => None,
             };
-            let _ = ev_tx.send(Event::Disconnected(reason));
+            let _ = ev_tx.send(event);
         })
         .expect("spawn RDP thread");
     handle
@@ -479,7 +483,7 @@ fn sign_in_error(host: &str, e: &connector::ConnectorError) -> anyhow::Error {
     }
 }
 
-fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, inputs: Receiver<Input>, ev: &Sender<Event>) -> Result<()> {
+fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, inputs: Receiver<Input>, ev: &Sender<Event>) -> Result<Option<String>> {
     let (clip_tx, clip_rx) = channel::<ClipboardMessage>();
     let clip_state = Arc::new(Mutex::new(ClipState { download_dir: cfg.download_dir.clone(), ..ClipState::default() }));
 
@@ -548,7 +552,7 @@ fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, i
                         let _ = framed.write_all(&f);
                     }
                 }
-                return Ok(());
+                return Ok(None);
             }
 
             // Input.
@@ -638,6 +642,11 @@ fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, i
                     publish(&image, fb, &mut dirty, &mut last_publish, true);
                     continue;
                 }
+                // Some servers close the stream without sending a disconnect reason.
+                // Retrying after EOF could take the desktop back from another client.
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    return Ok(Some("The remote computer closed the RDP connection.".into()));
+                }
                 Err(e) => return Err(anyhow!(e).context("connection lost")),
             };
             if matches!(action, ironrdp_pdu::Action::X224) && payload.len() > 12 {
@@ -716,8 +725,9 @@ fn run(cfg: &Config, fb: &Arc<Mutex<Framebuffer>>, stopping: &Arc<AtomicBool>, i
                     }
                     ActiveStageOutput::Terminate(reason) => {
                         publish(&image, fb, &mut dirty, &mut last_publish, true);
-                        log::info!("{}: RDP session terminated: {}", cfg.host, reason.description());
-                        return Ok(());
+                        let reason = reason.description();
+                        log::info!("{}: RDP session terminated: {reason}", cfg.host);
+                        return Ok(Some(format!("The remote RDP session ended ({reason}).")));
                     }
                     _ => {}
                 }

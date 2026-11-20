@@ -717,6 +717,11 @@ impl App {
                             Progress::Failed { name, reason } => FileNote { text: format!("Could not copy {name}. {reason}"), error: true, until: fade(10), reveal: None, fetch: vec![] },
                         });
                     }
+                    Event::SessionEnded(reason) => {
+                        s.handle = None;
+                        s.retry_at = None;
+                        s.status = Status::Failed(reason);
+                    }
                     Event::Disconnected(reason) => {
                         s.handle = None;
                         let reason = reason.unwrap_or_else(|| "The remote computer closed the connection.".into());
