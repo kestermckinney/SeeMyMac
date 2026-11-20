@@ -518,6 +518,38 @@ fn clicking_the_remote_picture_sends_mouse_buttons(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn mouse_wheel_sends_horizontal_and_vertical_input(cx: &mut TestAppContext) {
+    let (port, rx) = fake_mac(64, 36, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected frame", |a| a.sessions["c1"].status == Status::Connected && !a.sessions["c1"].tiles.is_empty());
+    draw(cx);
+    let position = view.read_with(cx, |a, _| a.area.get().center());
+    for (x, y) in [(1.0, 0.0), (-1.0, 1.0)] {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Lines(gpui::point(x, y)),
+            ..Default::default()
+        });
+    }
+
+    let end = Instant::now() + Duration::from_secs(5);
+    let mut seen = Vec::new();
+    let has_notch = |bytes: &[u8], mask| {
+        bytes.windows(12).any(|w| w[..2] == [5, mask] && w[6..8] == [5, 0] && w[2..6] == w[8..12])
+    };
+    while Instant::now() < end {
+        if let Ok(bytes) = rx.recv_timeout(Duration::from_millis(100)) {
+            seen = bytes;
+            if [32, 64, 8].iter().all(|&mask| has_notch(&seen, mask)) {
+                return;
+            }
+        }
+    }
+    panic!("expected left, right, and up wheel presses and releases on the server: {seen:?}");
+}
+
+#[gpui::test]
 fn two_monitors_selector_shortcuts_and_both_view(cx: &mut TestAppContext) {
     let (port, _rx) = fake_mac(128, 36, true);
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));

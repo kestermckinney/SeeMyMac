@@ -2000,7 +2000,7 @@ impl App {
                 return true;
             }
         }
-        self.scroll_at(mon, area, pos, dy);
+        self.send_scroll_at(mon, area, pos, dx, dy);
         false
     }
 
@@ -2011,16 +2011,25 @@ impl App {
     }
 
     pub fn scroll_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>, dy: f32) {
-        if dy == 0.0 {
+        self.send_scroll_at(mon, area, pos, 0.0, dy);
+    }
+
+    fn send_scroll_at(&mut self, mon: Option<usize>, area: Bounds<Pixels>, pos: Point<Pixels>, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 {
             return;
         }
         self.pointer_at(mon, area, pos, None, None);
-        let mask = if dy > 0.0 { 8 } else { 16 }; // button 4 = up, 5 = down
         let b = self.buttons;
         let ((x, y), (ox, oy)) = self.remote_xy(mon, area, pos).unwrap_or(((0, 0), self.active_session().map_or((0, 0), |s| s.offset)));
         let (x, y) = (x + ox, y + oy);
-        self.send(Input::Pointer { x, y, buttons: b | mask });
-        self.send(Input::Pointer { x, y, buttons: b });
+        // RFB wheel buttons 4–7 represent up, down, left, and right.
+        for (delta, positive, negative) in [(dy, 8, 16), (dx, 32, 64)] {
+            if delta != 0.0 {
+                let mask = if delta > 0.0 { positive } else { negative };
+                self.send(Input::Pointer { x, y, buttons: b | mask });
+                self.send(Input::Pointer { x, y, buttons: b });
+            }
+        }
     }
 
     /// The picture of remote monitor `m` for a spanning window: image, size and scaling.

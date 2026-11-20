@@ -1600,10 +1600,20 @@ mod tests {
     #[test]
     fn wheel_notches_become_wheel_events() {
         let mut m = Mouse::default();
-        let ev = m.apply(10, 10, 8);
-        assert!(ev.iter().any(|e| matches!(e, FastPathInputEvent::MouseEvent(p) if p.number_of_wheel_rotation_units == 120)));
-        let ev = m.apply(10, 10, 0);
-        assert!(!ev.iter().any(|e| matches!(e, FastPathInputEvent::MouseEvent(p) if p.number_of_wheel_rotation_units != 0)));
+        use ironrdp_pdu::input::mouse::PointerFlags;
+
+        for (mask, flag, units) in [
+            (8, PointerFlags::VERTICAL_WHEEL, 120),
+            (16, PointerFlags::VERTICAL_WHEEL, -120),
+            (32, PointerFlags::HORIZONTAL_WHEEL, -120),
+            (64, PointerFlags::HORIZONTAL_WHEEL, 120),
+        ] {
+            let ev = m.apply(10, 10, mask);
+            assert!(ev.iter().any(|e| matches!(e, FastPathInputEvent::MouseEvent(p)
+                if p.flags.contains(flag) && p.number_of_wheel_rotation_units == units)));
+            let ev = m.apply(10, 10, 0);
+            assert!(!ev.iter().any(|e| matches!(e, FastPathInputEvent::MouseEvent(p) if p.number_of_wheel_rotation_units != 0)));
+        }
     }
 
     #[test]
