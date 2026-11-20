@@ -370,7 +370,7 @@ impl App {
         let mb = |n: u64| format!("{:.1} MB", n as f64 / 1_048_576.0);
         let (title, body, footer): (String, AnyElement, AnyElement) = match &self.update {
             UpdateStatus::Available(r) => {
-                let notes: String = r.notes.trim().chars().take(1500).collect();
+                let notes = r.notes.trim();
                 (
                     format!("SeeMyMac {} is available", r.version),
                     div()
@@ -379,7 +379,7 @@ impl App {
                         .flex_col()
                         .gap(px(8.0))
                         .child(div().child(format!("You have version {}. Download and install version {} now? SeeMyMac will restart.", crate::update::current_version(), r.version)))
-                        .children((!notes.is_empty()).then(|| div().id("update-notes").max_h(px(220.0)).overflow_y_scroll().p(px(10.0)).rounded(px(6.0)).border_1().border_color(rgb(BORDER)).text_size(px(12.0)).text_color(rgb(MUTED)).child(notes)))
+                        .children((!notes.is_empty()).then(|| div().id("update-notes").max_h(px(220.0)).overflow_y_scroll().p(px(10.0)).rounded(px(6.0)).border_1().border_color(rgb(BORDER)).text_size(px(12.0)).text_color(rgb(MUTED)).child(notes.to_owned())))
                         .into_any_element(),
                     div()
                         .flex()
