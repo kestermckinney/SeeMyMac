@@ -76,10 +76,13 @@ pub struct Tile {
     pub resolution: (u32, u32),
 }
 
+const REMOTE_MODIFIER_KEYS: [u32; 4] = [rfb::KEYSYM_SHIFT, rfb::KEYSYM_CONTROL, rfb::KEYSYM_ALT, rfb::KEYSYM_SUPER];
+
 pub struct Session {
     pub conn_id: String,
     pub status: Status,
     pub handle: Option<rfb::Handle>,
+    remote_mods: [bool; 4],
     pub user: String,
     pub pass: String,
     pub scaling: Scaling,
@@ -259,7 +262,6 @@ pub struct App {
     /// The same displays' ids, in the same order (primary first, then left to right).
     local_display_ids: Vec<DisplayId>,
     pub held_keys: HashMap<String, u32>,
-    pub held_mods: Modifiers,
     pub buttons: u8,
     /// Last key press or click forwarded, to log display latency right after it.
     last_input: Option<Instant>,
@@ -364,7 +366,6 @@ impl App {
             area: Rc::new(Cell::new(Bounds::default())),
             local_displays: Vec::new(),
             held_keys: HashMap::new(),
-            held_mods: Modifiers::default(),
             buttons: 0,
             last_input: None,
             clip_checked: Instant::now(),
@@ -422,6 +423,7 @@ impl App {
                 conn_id: id.to_string(),
                 status: Status::Connecting,
                 handle: None,
+                remote_mods: [false; 4],
                 user: conn.user.clone(),
                 pass: String::new(),
                 scaling: conn.scaling,
@@ -570,6 +572,7 @@ impl App {
         for fb in std::iter::once(&handle.fb).chain(handle.fb2.as_ref()) {
             fb.lock().unwrap().wake = Some(self.wake.clone());
         }
+        s.remote_mods = [false; 4];
         s.handle = Some(handle);
     }
 
@@ -827,6 +830,7 @@ impl App {
                 // The handle is lent out so the refresh can update the session too.
                 if let Some(h) = s.handle.take() {
                     changed |= hp_refresh(s, &h, due, eff_mon, self.last_input, &mut retired);
+                    s.remote_mods = [false; 4];
                     s.handle = Some(h);
                 }
             } else if due && (version != s.seen_version || s.seen_mon != Some(eff_mon) || s.tiles.is_empty()) {
@@ -1768,6 +1772,7 @@ impl App {
         if let Some(sym) = self.held_keys.remove(&ev.keystroke.key) {
             self.send(Input::Key { keysym: sym, down: false });
         }
+        self.sync_modifiers(ev.keystroke.modifiers);
     }
 
     fn forward_key(&mut self, ev: &KeyDownEvent, _from_shortcut: bool) {
@@ -1776,6 +1781,7 @@ impl App {
             return;
         }
         let k = &ev.keystroke;
+        self.sync_modifiers(k.modifiers);
         let sym = rfb::keysym(&k.key, k.key_char.as_deref());
         // Never log the character itself: this may be a password.
         log::debug!("key down: {} (key_char {}, repeat {})", if k.key.chars().count() == 1 { "character key" } else { k.key.as_str() }, if k.key_char.is_some() { "present" } else { "none" }, ev.is_held);
@@ -1820,24 +1826,27 @@ impl App {
         }
     }
 
-    /// Modifier keys arrive as their own event in gpui; mirror changes to the remote.
     pub fn on_modifiers(&mut self, ev: &ModifiersChangedEvent, _w: &mut Window, _cx: &mut Context<Self>) {
-        let (old, new) = (self.held_mods, ev.modifiers);
-        self.held_mods = new;
-        if self.st.view != View::Idle {
-            return;
-        }
-        let (old_ctrl, old_cmd) = self.settings.remote_modifiers(old.control, old.platform);
-        let (new_ctrl, new_cmd) = self.settings.remote_modifiers(new.control, new.platform);
-        for (was, now, sym) in [
-            (old.shift, new.shift, rfb::KEYSYM_SHIFT),
-            (old_ctrl, new_ctrl, rfb::KEYSYM_CONTROL),
-            (old.alt, new.alt, rfb::KEYSYM_ALT),
-            (old_cmd, new_cmd, rfb::KEYSYM_SUPER),
-        ] {
-            if was != now {
-                self.send(Input::Key { keysym: sym, down: now });
+        self.sync_modifiers(ev.modifiers);
+    }
+
+    fn sync_modifiers(&mut self, modifiers: Modifiers) {
+        let (ctrl, cmd) = self.settings.remote_modifiers(modifiers.control, modifiers.platform);
+        for (id, session) in &mut self.sessions {
+            let Some(handle) = session.handle.as_ref().filter(|_| session.status == Status::Connected) else {
+                continue;
+            };
+            let desired = if self.st.active.as_ref() == Some(id) && self.st.view == View::Idle {
+                [modifiers.shift, ctrl, modifiers.alt, cmd]
+            } else {
+                [false; 4]
+            };
+            for ((was, now), keysym) in session.remote_mods.into_iter().zip(desired).zip(REMOTE_MODIFIER_KEYS) {
+                if was != now {
+                    handle.send(Input::Key { keysym, down: now });
+                }
             }
+            session.remote_mods = desired;
         }
     }
 
@@ -1887,12 +1896,14 @@ impl App {
     /// Press a `KEY_COMBOS` entry on the remote: modifiers down, key down and up, modifiers up.
     pub fn send_key_combo(&self, i: usize) {
         let Some(c) = KEY_COMBOS.get(i) else { return };
-        for m in c.mods {
+        let held = self.active_session().map_or([false; 4], |s| s.remote_mods);
+        let is_held = |m| REMOTE_MODIFIER_KEYS.iter().zip(held).any(|(key, down)| key == m && down);
+        for m in c.mods.iter().filter(|m| !is_held(*m)) {
             self.send(Input::Key { keysym: *m, down: true });
         }
         self.send(Input::Key { keysym: c.key, down: true });
         self.send(Input::Key { keysym: c.key, down: false });
-        for m in c.mods.iter().rev() {
+        for m in c.mods.iter().rev().filter(|m| !is_held(*m)) {
             self.send(Input::Key { keysym: *m, down: false });
         }
     }

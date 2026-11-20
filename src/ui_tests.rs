@@ -1084,6 +1084,41 @@ fn command_key_setting_swaps_modifiers_sent_to_the_mac(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn held_modifiers_from_key_events_reach_the_server(cx: &mut TestAppContext) {
+    use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, Modifiers};
+
+    let (port, rx) = fake_mac(32, 18, false);
+    let (view, cx) = cx.add_window_view(|window, cx| App::with_settings(store_with(Some(port)), crate::settings::Settings::default(), None, window, cx));
+    open_and_login(cx, &view, "c1");
+    tick_until(cx, &view, "connected", |a| a.sessions["c1"].status == Status::Connected);
+    draw(cx);
+
+    // A modifier can already be held when the remote view first receives input.
+    let modifiers = Modifiers { shift: true, control: true, ..Default::default() };
+    let key = Keystroke { modifiers, key: "left".into(), key_char: None };
+    cx.simulate_event(KeyDownEvent { keystroke: key, is_held: false });
+    cx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke { modifiers: Modifiers::default(), key: "left".into(), key_char: None },
+    });
+
+    let expected = [(1, 0xe1), (1, 0xe3), (1, 0x51), (0, 0x51), (0, 0xe1), (0, 0xe3)];
+    let end = Instant::now() + Duration::from_secs(5);
+    while let Ok(bytes) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+        let mut rest = bytes.as_slice();
+        if expected.iter().all(|&(down, key)| {
+            let Some(pos) = rest.windows(8).position(|w| w == [4, down, 0, 0, 0, 0, 0xff, key]) else {
+                return false;
+            };
+            rest = &rest[pos + 8..];
+            true
+        }) {
+            return;
+        }
+    }
+    panic!("expected Shift and Control to surround the Left Arrow key events");
+}
+
+#[gpui::test]
 fn cmd_space_combo_reaches_the_mac_as_command_space(cx: &mut TestAppContext) {
     let (port, rx) = fake_mac(32, 18, false);
     let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(Some(port)), None, window, cx));
