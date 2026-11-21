@@ -29,11 +29,13 @@ Open SeeMyMac from your applications menu, or run:
 flatpak run io.gitlab.kestermckinney.SeeMyMac
 ```
 
-Run `flatpak update` to install updates.
+Run `flatpak update` to install updates from your configured Flatpak remote. SeeMyMac also checks for newer GitHub releases and shows a link to the GitHub project when one is available. You can check on demand under **About… → Check for updates**.
 
 ### Updates
 
-On Windows and macOS SeeMyMac checks GitLab for a newer release when it starts (at most once a day; switch this off in Settings → General → Updates) and asks whether to download and install it. **About… → Check for updates** looks on demand. The installer replaces the copy in your user profile and SeeMyMac restarts by itself. Releases need the Windows installers and the macOS zip attached before they are published: build them locally and attach them with `packaging/gitlab/upload-installer.py`. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
+On Windows and macOS SeeMyMac checks GitHub and GitLab for a newer release at startup and every six hours while it’s running (switch this off in Settings → General → Updates) and asks whether to download and install it. **About… → Check for updates** looks on demand. SeeMyMac offers the newest release with a compatible installer and prefers GitHub when both hosts offer the same version. Until the GitHub mirror has a published release, GitLab supplies updates. The installer replaces the copy in your user profile and SeeMyMac restarts by itself.
+
+After mirroring the repository, create a GitHub Release for the version tag. Attach the Windows setup executable and the macOS zip to each release before publishing. For GitLab releases, use `packaging/gitlab/upload-installer.py`. For GitHub releases, upload the installers directly to the release. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
 
 ## UI Driver Tool
 

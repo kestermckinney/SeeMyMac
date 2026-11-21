@@ -190,7 +190,7 @@ fn empty_state_renders_and_menu_opens_with_shortcut(cx: &mut TestAppContext) {
 
 /// With "Check for updates automatically" on, a running SeeMyMac looks again once the interval
 /// has passed; a version found during a remote session waits until the user is back on the start
-/// screen. Turned off, it never looks by itself. (Linux builds never check.)
+/// screen. Turned off, it never looks by itself.
 #[cfg(not(target_os = "linux"))]
 #[gpui::test]
 fn updates_are_checked_periodically_without_interrupting_a_session(cx: &mut TestAppContext) {
@@ -234,6 +234,23 @@ fn updates_are_checked_periodically_without_interrupting_a_session(cx: &mut Test
     // Back on the start screen, it is offered.
     cx.update(|window, cx| view.update(cx, |a, cx| a.close_session("c1", window, cx)));
     tick_until(cx, &view, "update offered", |a| a.st.view == View::Update);
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn linux_update_notice_opens_the_github_project(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| App::new(store_with(None), None, window, cx));
+    view.update(cx, |app, cx| {
+        app.update_checker = || crate::update::CheckResult::GitHubNotice("9.9.9".into());
+        app.auto_update_check(cx);
+    });
+    tick_until(cx, &view, "Linux update notice", |app| app.st.view == View::Update);
+
+    draw(cx);
+    let github_button = cx.debug_bounds("update-github").expect("GitHub button is visible");
+    cx.simulate_click(github_button.center(), gpui::Modifiers::default());
+    assert_eq!(cx.opened_url().as_deref(), Some(crate::update::GITHUB_PROJECT_URL));
+    assert_eq!(view.read_with(cx, |app, _| app.st.view), View::Idle);
 }
 
 #[gpui::test]

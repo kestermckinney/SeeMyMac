@@ -51,6 +51,7 @@ pub enum UpdateStatus {
     Checking,
     UpToDate,
     Available(crate::update::Release),
+    GitHubNotice(String),
     Downloading { received: u64, total: Option<u64> },
     Installing,
     /// Something to tell the user on the About screen (no update to offer, or an error).
@@ -1327,10 +1328,9 @@ impl App {
 
     // ----- software updates ---------------------------------------------------
 
-    /// Whether SeeMyMac looks for updates by itself. Off when the user turned it off in Settings,
-    /// and on Linux, where Flatpak is updated by the software manager.
+    /// Whether SeeMyMac looks for updates by itself.
     fn auto_updates_on(&self) -> bool {
-        crate::update::ENABLED && self.settings.check_updates
+        self.settings.check_updates
     }
 
     /// At start-up: look for an update quietly, when the setting allows.
@@ -1359,10 +1359,10 @@ impl App {
         self.start_update_check(false, cx);
     }
 
-    /// Ask GitLab for the latest release on a background thread. `manual`: the user asked, so
+    /// Check for a newer release on a background thread. `manual`: the user asked, so
     /// the answer is always shown; otherwise only a newer version is mentioned.
     pub fn start_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
-        if !crate::update::ENABLED || matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing) {
+        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing) {
             return;
         }
         self.update = UpdateStatus::Checking;
@@ -1412,8 +1412,8 @@ impl App {
                 self.update_rx = None;
                 self.update = UpdateStatus::Idle;
             }
-            UpdateStatus::Available(r) => {
-                self.update_dismissed = Some(r.version);
+            UpdateStatus::Available(crate::update::Release { version, .. }) | UpdateStatus::GitHubNotice(version) => {
+                self.update_dismissed = Some(version);
                 self.update = UpdateStatus::Idle;
             }
             UpdateStatus::Installing => return,
@@ -1441,6 +1441,8 @@ impl App {
                             UpdateStatus::Idle
                         }
                         CheckResult::Available(r) => UpdateStatus::Available(r),
+                        CheckResult::GitHubNotice(version) if !manual && self.update_dismissed.as_deref() == Some(version.as_str()) => UpdateStatus::Idle,
+                        CheckResult::GitHubNotice(version) => UpdateStatus::GitHubNotice(version),
                         CheckResult::Manual(msg) => if manual { UpdateStatus::Info(msg) } else { UpdateStatus::Idle },
                         CheckResult::Failed(e) => {
                             log::warn!("update check failed: {e}");
@@ -1478,7 +1480,7 @@ impl App {
         // (or from the About screen, where the user asked). A background check never interrupts
         // a remote session: the offer waits until the user is back on the start screen.
         let in_the_way = !self.update_manual && self.st.active.is_some();
-        if matches!(self.update, UpdateStatus::Available(_)) && !in_the_way && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
+        if matches!(self.update, UpdateStatus::Available(_) | UpdateStatus::GitHubNotice(_)) && !in_the_way && self.st.view != View::Update && (self.st.view == View::Idle || self.st.view == View::About) {
             self.st.set_view(View::Update);
             window.focus(&self.focus);
             changed = true;

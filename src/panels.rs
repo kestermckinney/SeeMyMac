@@ -225,12 +225,13 @@ impl App {
                             .child(self.settings_check("s-toolbar", "Show the toolbar in the window", st.show_toolbar, |s, v| s.show_toolbar = v, cx))
                             .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Every command is also in the macOS menu bar. Turn the toolbar off to use only the menu bar; in full screen, move the pointer to the top of the screen to show it."))
                     })
-                    // Linux builds ship as a Flatpak, which the software manager updates.
-                    .when(crate::update::ENABLED, |d| {
-                        d.child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Updates"))
-                            .child(self.settings_check("s-updates", "Check for updates automatically", st.check_updates, |s, v| s.check_updates = v, cx))
-                            .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Looks for a new version at start-up and every 6 hours, and asks before installing it. Check for updates under About works either way."))
-                    })
+                    .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Updates"))
+                    .child(self.settings_check("s-updates", "Check for updates automatically", st.check_updates, |s, v| s.check_updates = v, cx))
+                    .child(div().pl(px(202.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child(if cfg!(target_os = "linux") {
+                        "Looks for new GitHub releases and shows a link when a newer version is available. Check for updates under About works either way."
+                    } else {
+                        "Looks for a new version at start-up and every 6 hours, and asks before installing it. Check for updates under About works either way."
+                    }))
                     .child(div().pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(rgb(MUTED)).child("Connections"))
                     .child(form_row("Reconnect attempts", self.settings_cycle("s-reconnect", &RECONNECT_CHOICES, st.max_reconnects, |n| if n == 0 { "Never reconnect".into() } else { format!("Up to {n}") }, |s, v| s.max_reconnects = v, cx)))
                     .child(form_row(
@@ -345,7 +346,7 @@ impl App {
         let footer = div()
             .flex()
             .w_full()
-            .when(crate::update::ENABLED, |d| d.child(secondary_btn("about-update", if busy { "Checking…" } else { "Check for updates" }).on_click(cx.listener(|this, _, _, cx| this.start_update_check(true, cx)))))
+            .child(secondary_btn("about-update", if busy { "Checking…" } else { "Check for updates" }).on_click(cx.listener(|this, _, _, cx| this.start_update_check(true, cx))))
             .child(div().flex_1())
             .child(primary_btn("about-close", "Close").on_click(cx.listener(|this, _, window, cx| this.close_overlay(window, cx))))
             .into_any_element();
@@ -356,6 +357,7 @@ impl App {
     fn update_status_line(&self, _cx: &mut Context<Self>) -> AnyElement {
         let (text, color) = match &self.update {
             UpdateStatus::Checking => ("Checking for updates…".to_string(), MUTED),
+            UpdateStatus::UpToDate if cfg!(target_os = "linux") => ("No newer release was found on GitHub.".to_string(), MUTED),
             UpdateStatus::UpToDate => ("You have the latest version.".to_string(), MUTED),
             UpdateStatus::Info(m) => (m.clone(), MUTED),
             UpdateStatus::Failed(m) => (m.clone(), DANGER),
@@ -391,6 +393,24 @@ impl App {
                         .into_any_element(),
                 )
             }
+            UpdateStatus::GitHubNotice(version) => (
+                format!("SeeMyMac {version} is available"),
+                div().child(format!(
+                    "You have version {}. Visit the SeeMyMac project on GitHub for the latest release and Linux installation instructions.",
+                    crate::update::current_version()
+                )).into_any_element(),
+                div()
+                    .flex()
+                    .w_full()
+                    .gap(px(8.0))
+                    .child(div().flex_1())
+                    .child(secondary_btn("update-later", "Later").on_click(cx.listener(|this, _, window, cx| this.dismiss_update(window, cx))))
+                    .child(primary_btn("update-github", "Open GitHub project").debug_selector(|| "update-github".into()).on_click(cx.listener(|this, _, window, cx| {
+                        cx.open_url(crate::update::GITHUB_PROJECT_URL);
+                        this.dismiss_update(window, cx);
+                    })))
+                    .into_any_element(),
+            ),
             UpdateStatus::Downloading { received, total } => {
                 let frac = total.filter(|t| *t > 0).map(|t| (*received as f32 / t as f32).clamp(0.0, 1.0));
                 let label = match total {
