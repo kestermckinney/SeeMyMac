@@ -1,4 +1,4 @@
-//! Self-update: asks GitLab for the latest release, downloads the installer for this
+//! Self-update: asks GitHub for the latest release, downloads the installer for this
 //! platform and starts it. Windows runs the Inno Setup installer silently (it waits for
 //! this process to exit, then relaunches the app); macOS replaces the app bundle with the
 //! downloaded one from a helper script that waits for this process. Linux builds never check:
@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const RELEASE_URL: &str = "https://gitlab.com/api/v4/projects/kestermckinney%2FSeeMyMac/releases/permalink/latest";
+const RELEASE_URL: &str = "https://api.github.com/repos/kestermckinney/SeeMyMac/releases/latest";
 const USER_AGENT: &str = concat!("SeeMyMac-Updater/", env!("CARGO_PKG_VERSION"));
 
 /// Whether this build looks for updates at all. Off on Linux, where Flatpak updates the app.
@@ -67,7 +67,8 @@ fn is_platform_asset(name: &str) -> bool {
     }
 }
 
-/// Interpret GitLab's release JSON for a program that is running `current`.
+/// Interpret the latest release JSON (GitHub's, or GitLab's as still served by older releases)
+/// for a program that is running `current`.
 pub fn parse_release(json: &str, current: &str) -> CheckResult {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return CheckResult::Failed("Unexpected response from the update server.".into());
@@ -84,7 +85,11 @@ pub fn parse_release(json: &str, current: &str) -> CheckResult {
     if !is_newer(version, current) {
         return CheckResult::UpToDate;
     }
-    let links = v["assets"]["links"].as_array().cloned().unwrap_or_default();
+    // GitLab lists downloads under assets.links; GitHub lists them as assets with browser_download_url.
+    let mut links = v["assets"]["links"].as_array().cloned().unwrap_or_default();
+    for asset in v["assets"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        links.push(serde_json::json!({"name": asset["name"], "direct_asset_url": asset["browser_download_url"]}));
+    }
     for link in &links {
         let url = link["direct_asset_url"].as_str().filter(|u| !u.is_empty()).or_else(|| link["url"].as_str()).unwrap_or("");
         // Only https downloads, never anything else a release page might list.
@@ -94,7 +99,7 @@ pub fn parse_release(json: &str, current: &str) -> CheckResult {
         let file = url.rsplit('/').next().unwrap_or("");
         let label = link["name"].as_str().unwrap_or("");
         if is_platform_asset(file) || is_platform_asset(label) {
-            return CheckResult::Available(Release { version: version.to_string(), notes: v["description"].as_str().unwrap_or("").to_string(), asset_url: url.to_string(), asset_name: if is_platform_asset(file) { file } else { label }.to_string() });
+            return CheckResult::Available(Release { version: version.to_string(), notes: v["body"].as_str().or_else(|| v["description"].as_str()).unwrap_or("").to_string(), asset_url: url.to_string(), asset_name: if is_platform_asset(file) { file } else { label }.to_string() });
         }
     }
     CheckResult::Manual(format!("Version {version} is available, but no installer was found for this computer. Please download it from the project page."))
@@ -104,7 +109,7 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30))).user_agent(USER_AGENT).build().into()
 }
 
-/// Ask GitLab whether a newer release exists. Never contacts it when updates are not [`ENABLED`].
+/// Ask GitHub whether a newer release exists. Never contacts it when updates are not [`ENABLED`].
 pub fn check() -> CheckResult {
     if !ENABLED {
         return CheckResult::UpToDate;
@@ -261,11 +266,11 @@ mod tests {
         format!(r#"{{"tag_name":"{tag}","description":"Notes","upcoming_release":{upcoming},"assets":{{"links":[{links}]}}}}"#)
     }
 
-    /// Talks to GitLab: `cargo test live_check -- --ignored`.
+    /// Talks to GitHub: `cargo test live_check -- --ignored`.
     #[cfg(not(target_os = "linux"))]
     #[test]
     #[ignore]
-    fn live_check_reaches_gitlab() {
+    fn live_check_reaches_github() {
         let r = check();
         println!("{r:?}");
         assert!(!matches!(r, CheckResult::Failed(_)), "{r:?}");
@@ -309,6 +314,29 @@ mod tests {
         }
         let only_debug = r#"{"name":"d","direct_asset_url":"https://x/SeeMyMac-0.2.0-debug-setup.exe"}"#;
         assert!(matches!(parse_release(&release("v0.2.0", only_debug, false), "0.1.4"), CheckResult::Manual(_)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn github_release_json_is_parsed() {
+        let json = r#"{"tag_name":"v0.5.0","body":"Notes","prerelease":false,"assets":[
+            {"name":"SeeMyMac-0.5.0-setup.exe","browser_download_url":"https://github.com/x/SeeMyMac-0.5.0-setup.exe"}]}"#;
+        match parse_release(json, "0.3.1") {
+            CheckResult::Available(r) => assert_eq!((r.version.as_str(), r.notes.as_str(), r.asset_name.as_str()), ("0.5.0", "Notes", "SeeMyMac-0.5.0-setup.exe")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn github_release_json_picks_the_mac_zip() {
+        let json = r#"{"tag_name":"v0.5.0","body":"Notes","assets":[
+            {"name":"SeeMyMac-0.5.0-macOS.pkg","browser_download_url":"https://github.com/x/SeeMyMac-0.5.0-macOS.pkg"},
+            {"name":"SeeMyMac-0.5.0-macOS.zip","browser_download_url":"https://github.com/x/SeeMyMac-0.5.0-macOS.zip"}]}"#;
+        match parse_release(json, "0.3.1") {
+            CheckResult::Available(r) => assert_eq!(r.asset_url, "https://github.com/x/SeeMyMac-0.5.0-macOS.zip"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[cfg(target_os = "linux")]
