@@ -4,11 +4,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$SCRIPT_DIR/flatpak-build"
-# REPO_DIR / BUNDLE_FILE are overridable via env so CI can export into a clone of
-# the already-published ostree repo (preserving update history / deltas).
+# REPO_DIR / BUNDLE_FILE are overridable via env, e.g. to export into a clone of
+# an already-published ostree repo (preserving update history / deltas).
 REPO_DIR="${REPO_DIR:-$SCRIPT_DIR/flatpak-repo}"
 BUNDLE_FILE="${BUNDLE_FILE:-$SCRIPT_DIR/SeeMyMac.flatpak}"
-APP_ID="io.gitlab.kestermckinney.SeeMyMac"
+APP_ID="io.github.kestermckinney.SeeMyMac"
 MANIFEST="$SCRIPT_DIR/${APP_ID}.yml"
 RUNTIME_VERSION="25.08"
 
@@ -51,15 +51,15 @@ fi
 
 # ── Source pins ──────────────────────────────────────────────────────────────
 # SMM_REF  Which SeeMyMac source build/install/repo compile:
-#            latest  (default) the newest v* tag on GitLab
+#            latest  (default) the newest v* tag on GitHub
 #            pinned  the `commit:` value committed in the manifest, untouched
 #            <tag|branch|sha>  that ref, e.g. v0.1.0, main, or a full commit SHA
 #          The resolved pin goes into a generated copy of the manifest; the
 #          committed manifest is never edited.
 SMM_REF="${SMM_REF:-latest}"
-SMM_GIT_URL="https://gitlab.com/kestermckinney/SeeMyMac.git"
-# SMM_SOURCE_URL  Clone the app source from here instead of GitLab (CI points it at
-#                 its own checkout, so a private project needs no credentials).
+SMM_GIT_URL="https://github.com/kestermckinney/SeeMyMac.git"
+# SMM_SOURCE_URL  Clone the app source from here instead of GitHub (for example
+#                 a local checkout, so unpushed commits can be built).
 SMM_SOURCE_URL="${SMM_SOURCE_URL:-}"
 # Must sit next to the real manifest so generated-sources.json resolves.
 RESOLVED_MANIFEST="$SCRIPT_DIR/.${APP_ID}.resolved.yml"
@@ -117,7 +117,7 @@ DESKTOP_FILE="$SCRIPT_DIR/${APP_ID}.desktop"
 usage() {
     echo "Usage: $0 [setup|sources|build|lint|run|install|repo|bundle|clean]"
     echo ""
-    echo "  NOTE: build/install/repo clone SeeMyMac from GitLab. By default they"
+    echo "  NOTE: build/install/repo clone SeeMyMac from GitHub. By default they"
     echo "        build the newest v* tag. Override with SMM_REF=<tag|branch|sha>,"
     echo "        or SMM_REF=pinned to use the manifest's committed 'commit:'."
     echo "        Push before building."
@@ -232,7 +232,7 @@ cmd_lint() {
 
 cmd_build() {
     echo "==> Building Flatpak..."
-    echo "    (clones SeeMyMac from GitLab at the resolved commit;"
+    echo "    (clones SeeMyMac from GitHub at the resolved commit;"
     echo "     ensure that commit is pushed to origin first)"
     resolve_manifest
     "${FLATPAK_BUILDER[@]}" "${BUILDER_FLAGS[@]}" --force-clean "$BUILD_DIR" "$MANIFEST"

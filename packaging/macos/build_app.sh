@@ -35,7 +35,7 @@ INSTALLER_IDENTITY="${INSTALLER_IDENTITY:-Developer ID Installer: Paul McKinney 
 NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-ProjectNotes-Notarize}"
 TARGETS="${TARGETS:-aarch64-apple-darwin x86_64-apple-darwin}"
 MIN_MACOS="13.0"
-BUNDLE_ID="io.gitlab.kestermckinney.SeeMyMac"
+BUNDLE_ID="io.github.kestermckinney.SeeMyMac"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"

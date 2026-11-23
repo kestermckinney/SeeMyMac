@@ -330,7 +330,7 @@ impl App {
             .child(div().text_color(rgb(MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))
             .child(div().text_size(px(12.0)).text_color(rgb(MUTED)).child(format!("Built {}", env!("SEEMYMAC_BUILD_TIME"))))
             .child(self.update_status_line(cx))
-            .child(div().mt(px(8.0)).child(link("about-gitlab", "gitlab.com/kestermckinney/SeeMyMac", "https://gitlab.com/kestermckinney/SeeMyMac", cx)))
+            .child(div().mt(px(8.0)).child(link("about-github", "github.com/kestermckinney/SeeMyMac", "https://github.com/kestermckinney/SeeMyMac", cx)))
             .child(div().w_full().h(px(1.0)).bg(rgb(DIVIDER)).my(px(10.0)))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Project managers: meet Project Notes"))
             .child(

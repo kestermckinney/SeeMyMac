@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.gitlab.kestermckinney.SeeMyMac</id>
+  <id>io.github.kestermckinney.SeeMyMac</id>
   <metadata_license>FSFAP</metadata_license>
   <project_license>MIT</project_license>
 
   <name>SeeMyMac</name>
   <summary>Remote desktop client for Macs</summary>
 
-  <developer id="io.gitlab.kestermckinney">
+  <developer id="io.github.kestermckinney">
     <name>Kester McKinney</name>
   </developer>
 
@@ -24,9 +24,9 @@
     </p>
   </description>
 
-  <launchable type="desktop-id">io.gitlab.kestermckinney.SeeMyMac.desktop</launchable>
+  <launchable type="desktop-id">io.github.kestermckinney.SeeMyMac.desktop</launchable>
 
-  <url type="homepage">https://gitlab.com/kestermckinney/SeeMyMac</url>
+  <url type="homepage">https://github.com/kestermckinney/SeeMyMac</url>
 
   <content_rating type="oars-1.1"/>
 

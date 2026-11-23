@@ -1,4 +1,4 @@
-app-id: io.gitlab.kestermckinney.SeeMyMac
+app-id: io.github.kestermckinney.SeeMyMac
 runtime: org.freedesktop.Platform
 runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
@@ -36,17 +36,17 @@ modules:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       - cargo --offline build --release --verbose --bin see_my_mac
       - install -Dm755 target/release/see_my_mac /app/bin/see_my_mac
-      - install -Dm644 packaging/linux/io.gitlab.kestermckinney.SeeMyMac.desktop /app/share/applications/io.gitlab.kestermckinney.SeeMyMac.desktop
-      - install -Dm644 packaging/linux/io.gitlab.kestermckinney.SeeMyMac.metainfo.xml /app/share/metainfo/io.gitlab.kestermckinney.SeeMyMac.metainfo.xml
-      - install -Dm644 assets/icons/seemac.svg /app/share/icons/hicolor/scalable/apps/io.gitlab.kestermckinney.SeeMyMac.svg
-      - install -Dm644 assets/icons/seemac.png /app/share/icons/hicolor/256x256/apps/io.gitlab.kestermckinney.SeeMyMac.png
+      - install -Dm644 packaging/linux/io.github.kestermckinney.SeeMyMac.desktop /app/share/applications/io.github.kestermckinney.SeeMyMac.desktop
+      - install -Dm644 packaging/linux/io.github.kestermckinney.SeeMyMac.metainfo.xml /app/share/metainfo/io.github.kestermckinney.SeeMyMac.metainfo.xml
+      - install -Dm644 assets/icons/seemac.svg /app/share/icons/hicolor/scalable/apps/io.github.kestermckinney.SeeMyMac.svg
+      - install -Dm644 assets/icons/seemac.png /app/share/icons/hicolor/256x256/apps/io.github.kestermckinney.SeeMyMac.png
     sources:
-      # Pinned git source (immutable and fetched from the public remote). The
-      # release workflow overwrites `commit:` with the tag's own SHA, and
-      # build-flatpak.sh does the same for local runs (see SMM_REF there). The
-      # value here is only used with SMM_REF=pinned or when building this file directly.
+      # Pinned git source (immutable and fetched from the public remote).
+      # build-flatpak.sh overwrites `commit:` with the resolved ref's SHA (see
+      # SMM_REF there). The value here is only used with SMM_REF=pinned or when
+      # building this file directly.
       - type: git
-        url: https://gitlab.com/kestermckinney/SeeMyMac.git
+        url: https://github.com/kestermckinney/SeeMyMac.git
         commit: e50c45cce5c345c56493a13624d8d1bcaa98e38e
       # Cargo crates (generated from Cargo.lock; refresh with `build-flatpak.sh sources`).
       - generated-sources.json

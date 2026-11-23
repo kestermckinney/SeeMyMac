@@ -27,7 +27,7 @@ fn main() {
                 window_decorations: Some(if native_frame { WindowDecorations::Server } else { WindowDecorations::Client }),
                 window_min_size: Some(size(px(640.0), px(400.0))),
                 window_background: if native_frame { WindowBackgroundAppearance::Opaque } else { WindowBackgroundAppearance::Transparent },
-                app_id: Some("io.gitlab.kestermckinney.SeeMyMac".into()),
+                app_id: Some("io.github.kestermckinney.SeeMyMac".into()),
                 ..Default::default()
             },
             |window, cx| {

@@ -16,26 +16,35 @@ Open `SeeMyMac-<version>-macOS.pkg` and follow the installer: it shows the licen
 
 ### Linux
 
-Install [Flatpak](https://flatpak.org/setup/) for your distribution, then add the SeeMyMac repository and install the app:
+Install [Flatpak](https://flatpak.org/setup/) for your distribution. Download `SeeMyMac.flatpak` from the [latest GitHub release](https://github.com/kestermckinney/SeeMyMac/releases/latest), then install it:
 
 ```bash
-flatpak remote-add --if-not-exists seemymac https://kestermckinney.gitlab.io/SeeMyMac/flatpak/seemymac.flatpakrepo
-flatpak install seemymac io.gitlab.kestermckinney.SeeMyMac
+flatpak install --user SeeMyMac.flatpak
 ```
 
 Open SeeMyMac from your applications menu, or run:
 
 ```bash
-flatpak run io.gitlab.kestermckinney.SeeMyMac
+flatpak run io.github.kestermckinney.SeeMyMac
 ```
 
-Run `flatpak update` to install updates from your configured Flatpak remote. SeeMyMac also checks for newer GitHub releases and shows a link to the GitHub project when one is available. You can check on demand under **About… → Check for updates**.
+SeeMyMac checks GitHub for a newer release and shows a link to the release page when one is available (**About… → Check for updates** checks on demand). To update, download the new `SeeMyMac.flatpak` and install it the same way.
+
+Earlier releases used the app ID `io.gitlab.kestermckinney.SeeMyMac`, which Flatpak treats as a different app. To move your saved connections and settings across, install the new app, copy them over, then remove the old one:
+
+```bash
+mkdir -p ~/.var/app/io.github.kestermckinney.SeeMyMac/config
+cp -r ~/.var/app/io.gitlab.kestermckinney.SeeMyMac/config/SeeMyMac ~/.var/app/io.github.kestermckinney.SeeMyMac/config/
+flatpak uninstall io.gitlab.kestermckinney.SeeMyMac
+```
 
 ### Updates
 
-On Windows and macOS SeeMyMac checks GitHub and GitLab for a newer release at startup and every six hours while it’s running (switch this off in Settings → General → Updates) and asks whether to download and install it. **About… → Check for updates** looks on demand. SeeMyMac offers the newest release with a compatible installer and prefers GitHub when both hosts offer the same version. Until the GitHub mirror has a published release, GitLab supplies updates. The installer replaces the copy in your user profile and SeeMyMac restarts by itself.
+On Windows and macOS SeeMyMac checks GitHub for a newer release at startup and every six hours while it’s running (switch this off in Settings → General → Updates) and asks whether to download and install it. **About… → Check for updates** checks on demand. The installer replaces the copy in your user profile and SeeMyMac restarts by itself.
 
-After mirroring the repository, create a GitHub Release for the version tag. Attach the Windows setup executable and the macOS zip to each release before publishing. For GitLab releases, use `packaging/gitlab/upload-installer.py`. For GitHub releases, upload the installers directly to the release. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
+### Publishing a release
+
+Releases are built by hand and published on GitHub; see `packaging/RELEASING.md`. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
 
 ## UI Driver Tool
 
