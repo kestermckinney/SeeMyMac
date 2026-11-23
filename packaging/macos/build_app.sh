@@ -24,6 +24,9 @@
 #   SIGN_IDENTITY              Developer ID Application certificate name
 #   INSTALLER_IDENTITY         Developer ID Installer certificate name (signs the .pkg)
 #   NOTARIZE_KEYCHAIN_PROFILE  created once with: xcrun notarytool store-credentials <profile>
+#   NOTARY_API_KEY_PATH        App Store Connect API key (.p8) to notarize with instead of the profile;
+#   NOTARY_API_KEY_ID          used by the GitHub Actions release workflow
+#   NOTARY_API_ISSUER_ID
 #   TARGETS                    Rust targets to build (default: both Mac architectures); set one
 #                              (e.g. aarch64-apple-darwin) for a quick local build
 
@@ -122,7 +125,13 @@ fi
 
 zip_app() { rm -f "${ZIP}"; ditto -c -k --keepParent "${APP}" "${ZIP}"; }
 notarize() {
-    xcrun notarytool submit "$1" --team-id "${TEAM_ID}" --keychain-profile "${NOTARIZE_KEYCHAIN_PROFILE}" --wait
+    if [[ -n "${NOTARY_API_KEY_PATH:-}" ]]; then
+        # CI: an App Store Connect API key (no keychain profile needed).
+        xcrun notarytool submit "$1" --team-id "${TEAM_ID}" --key "${NOTARY_API_KEY_PATH}" \
+            --key-id "${NOTARY_API_KEY_ID:?set NOTARY_API_KEY_ID}" --issuer "${NOTARY_API_ISSUER_ID:?set NOTARY_API_ISSUER_ID}" --wait
+    else
+        xcrun notarytool submit "$1" --team-id "${TEAM_ID}" --keychain-profile "${NOTARIZE_KEYCHAIN_PROFILE}" --wait
+    fi
 }
 
 # ── Notarize and staple, then zip ─────────────────────────────────────────────
