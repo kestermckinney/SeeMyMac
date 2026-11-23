@@ -49,6 +49,9 @@ echo "Signing key check passed"
 # Reject accidental key rotation: installed users trust the published public key.
 gpg --batch --export "$FLATPAK_GPG_KEY_ID" | cmp -s - packaging/linux/seemymac.gpg \
   || { echo 'Signing key differs from packaging/linux/seemymac.gpg; review key migration before publishing'; exit 1; }
+# The .flatpakrepo users add must carry the same public key.
+[ "$(sed -n 's/^GPGKey=//p' packaging/linux/seemymac.flatpakrepo)" = "$(base64 -w0 packaging/linux/seemymac.gpg)" ] \
+  || { echo 'GPGKey in packaging/linux/seemymac.flatpakrepo does not match packaging/linux/seemymac.gpg'; exit 1; }
 
 version="$(sed -n 's/^version = "\([0-9.]*\)"/\1/p' Cargo.toml | head -n1)"
 [ "$GITHUB_REF_NAME" = "v$version" ] || { echo 'Tag does not match application version'; exit 1; }
@@ -62,9 +65,15 @@ git config --global --add safe.directory '*'
 export SMM_SOURCE_URL="file://$GITHUB_WORKSPACE"
 export GPG_KEY_ID="$FLATPAK_GPG_KEY_ID" GPG_HOMEDIR="$GNUPGHOME"
 export SMM_REF="$GITHUB_SHA"
+# The bundle points `flatpak update` at the repository published on GitHub Pages
+# (the release workflow's pages job), the same one seemymac.flatpakrepo adds.
+export APP_REPO_URL="$(sed -n 's/^Url=//p' packaging/linux/seemymac.flatpakrepo)"
 # Export performs the build; do not compile everything twice.
 # cmd_repo needs the build directory to exist before invoking flatpak-builder.
 mkdir -p packaging/linux/flatpak-build
 bash packaging/linux/build-flatpak.sh sources
 bash packaging/linux/build-flatpak.sh repo
 bash packaging/linux/build-flatpak.sh bundle
+for f in summary summary.sig; do
+  [ -s "packaging/linux/flatpak-repo/$f" ] || { echo "The exported repository has no $f"; exit 1; }
+done

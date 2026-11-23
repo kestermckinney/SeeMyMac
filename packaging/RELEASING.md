@@ -9,6 +9,21 @@ attaches them to a GitHub release with the file names the in-app updater expects
 | `windows` | `windows-2022` | `SeeMyMac-X.Y.Z-setup.exe` (ARM64 and x86, unsigned) |
 | `macos` | `macos-15` | `SeeMyMac-X.Y.Z-macOS.zip` and `.pkg` (signed, notarized, stapled) |
 | `release` | `ubuntu-latest` | creates the release from `packaging/RELEASE_NOTES.md` and attaches the files |
+| `pages` | `ubuntu-latest` | publishes the signed Flatpak repository to GitHub Pages |
+
+The `flatpak` job also exports a signed OSTree repository. After the release is created,
+the `pages` job publishes it, with `packaging/linux/seemymac.flatpakrepo` and the icon, at
+`https://kestermckinney.github.io/SeeMyMac/flatpak/`. That is the remote Linux users add
+(see the README), and the bundle names it too, so `flatpak update` finds new releases
+either way. Each release replaces the whole site, so the repository holds only the newest
+build (x86_64); older versions stay on the GitHub releases.
+
+### One-time GitHub Pages setup
+
+1. **Settings → Pages → Build and deployment → Source:** *GitHub Actions*.
+2. **Settings → Environments → github-pages → Deployment branches and tags:** add a tag
+   rule for `v*`. By default the environment only accepts the default branch, and the
+   `pages` job runs for a tag.
 
 The updater reads the latest published release from
 `https://api.github.com/repos/kestermckinney/SeeMyMac/releases/latest`; drafts and

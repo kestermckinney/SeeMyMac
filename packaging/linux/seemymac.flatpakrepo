@@ -1,0 +1,11 @@
+[Flatpak Repo]
+Title=SeeMyMac
+Url=https://kestermckinney.github.io/SeeMyMac/flatpak/
+Homepage=https://github.com/kestermckinney/SeeMyMac
+Comment=Remote desktop client for Macs
+Description=Official Flatpak repository for SeeMyMac. Add this remote to install SeeMyMac and receive updates via `flatpak update`.
+Icon=https://kestermckinney.github.io/SeeMyMac/flatpak/icon.png
+# Single-line, base64-encoded public half of the repo signing key
+# (packaging/linux/seemymac.gpg): base64 --wrap=0 packaging/linux/seemymac.gpg
+# packaging/ci/build-flatpak-release.sh refuses to publish if the two differ.
+GPGKey=mDMEavKAJRYJKwYBBAHaRw8BAQdAFYIzD6lv/v2aHDOiLZS0AOFzxWnbhy9HqrlekKATH3+0IVNlZU15TWFjIEZsYXRwYWsgU2lnbmluZyAoR2l0TGFiKYiTBBMWCgA7FiEECOQVZu1moDmJJphZ7XsesufBfvYFAmrygCUCGwMFCwkIBwICIgIGFQoJCAsCBBYCAwECHgcCF4AACgkQ7XsesufBfvZBcAD/SHNCrhLjVCW6y5blsv3RGg9hbiDo3JewFevrJ8RBEzcA/2Gy0l5CR2+qoU1fRm3KbQmIS+TNdgVhchTGxoRceo4N

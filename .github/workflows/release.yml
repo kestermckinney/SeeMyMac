@@ -62,6 +62,22 @@ jobs:
           path: dist/flatpak/*
           if-no-files-found: error
 
+      # The signed OSTree repository, with the .flatpakrepo users add and its icon. The pages
+      # job publishes it at https://kestermckinney.github.io/SeeMyMac/flatpak/.
+      - name: Stage the Flatpak repository
+        run: |
+          mkdir -p dist/flatpak-repo
+          cp -r packaging/linux/flatpak-repo/. dist/flatpak-repo/
+          rm -rf dist/flatpak-repo/tmp dist/flatpak-repo/.lock
+          cp packaging/linux/seemymac.flatpakrepo dist/flatpak-repo/
+          cp assets/icons/seemac.png dist/flatpak-repo/icon.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-repo
+          path: dist/flatpak-repo/
+          if-no-files-found: error
+
   windows:
     name: Windows installer
     runs-on: windows-2022
@@ -159,10 +175,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Named downloads, so the Flatpak repository artifact stays out of the release.
       - uses: actions/download-artifact@v4
         with:
+          name: flatpak
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+          path: dist
 
       - name: Create the release with the installers
         env:
@@ -181,3 +206,36 @@ jobs:
             gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "SeeMyMac ${version}" \
               --notes-file packaging/RELEASE_NOTES.md
           fi
+
+  pages:
+    name: Publish the Flatpak repository
+    # After the release, so `flatpak update` never offers a version that has no release.
+    needs: [release]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    # The github-pages environment must allow v* tags (see packaging/RELEASING.md).
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}flatpak/seemymac.flatpakrepo
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: flatpak-repo
+          path: site/flatpak
+
+      - name: Check the repository
+        run: |
+          set -euo pipefail
+          for f in config summary summary.sig seemymac.flatpakrepo icon.png; do
+            [ -s "site/flatpak/$f" ] || { echo "Missing site/flatpak/$f"; exit 1; }
+          done
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -16,11 +16,15 @@ Open `SeeMyMac-<version>-macOS.pkg` and follow the installer: it shows the licen
 
 ### Linux
 
-Install [Flatpak](https://flatpak.org/setup/) for your distribution. Download `SeeMyMac.flatpak` from the [latest GitHub release](https://github.com/kestermckinney/SeeMyMac/releases/latest), then install it:
+Install [Flatpak](https://flatpak.org/setup/) for your distribution. Then add the SeeMyMac Flatpak remote, which is hosted on GitHub Pages, and install the app from it:
 
 ```bash
-flatpak install --user SeeMyMac.flatpak
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists seemymac https://kestermckinney.github.io/SeeMyMac/flatpak/seemymac.flatpakrepo
+flatpak install --user seemymac io.github.kestermckinney.SeeMyMac
 ```
+
+The first line adds Flathub, which supplies the freedesktop runtime SeeMyMac runs on. Skip it if Flathub is already set up for your user. The SeeMyMac remote is signed with the key in `packaging/linux/seemymac.gpg`, and Flatpak checks that signature on every install and update. Builds are x86_64 only.
 
 Open SeeMyMac from your applications menu, or run:
 
@@ -28,7 +32,13 @@ Open SeeMyMac from your applications menu, or run:
 flatpak run io.github.kestermckinney.SeeMyMac
 ```
 
-SeeMyMac checks GitHub for a newer release and shows a link to the release page when one is available (**About… → Check for updates** checks on demand). To update, download the new `SeeMyMac.flatpak` and install it the same way.
+To update SeeMyMac, run `flatpak update` (or use your software centre). SeeMyMac also checks GitHub for a newer release and shows a link to the release page when one is available (**About… → Check for updates** checks on demand).
+
+You can also download `SeeMyMac.flatpak` from the [latest GitHub release](https://github.com/kestermckinney/SeeMyMac/releases/latest) and install it with `flatpak install --user SeeMyMac.flatpak`. Bundles from releases after 0.5.0 point at the same remote, so `flatpak update` keeps them up to date. If you installed the 0.5.0 bundle, add the remote as shown above and switch to it; your settings are kept:
+
+```bash
+flatpak install --user --reinstall seemymac io.github.kestermckinney.SeeMyMac
+```
 
 Earlier releases used the app ID `io.gitlab.kestermckinney.SeeMyMac`, which Flatpak treats as a different app. To move your saved connections and settings across, install the new app, copy them over, then remove the old one:
 
