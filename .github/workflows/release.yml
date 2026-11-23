@@ -22,7 +22,7 @@ env:
 jobs:
   flatpak:
     name: Flatpak (Linux)
-    # The Flatpak build needs a v* tag (build-release.sh checks it), so it skips manual runs.
+    # The Flatpak build needs a v* tag (build-flatpak-release.sh checks it), so it skips manual runs.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # flatpak-builder needs bubblewrap and FUSE-free sandboxing from a privileged container.
@@ -31,11 +31,6 @@ jobs:
       options: --privileged
     timeout-minutes: 120
     env:
-      # Read by packaging/gitlab/build-release.sh, which the GitLab pipeline also uses.
-      CI_PROJECT_DIR: ${{ github.workspace }}
-      CI_COMMIT_SHA: ${{ github.sha }}
-      CI_COMMIT_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-      FLATPAK_REPO_URL: https://kestermckinney.gitlab.io/SeeMyMac/flatpak/
       DISABLE_ROFILES_FUSE: '1'
       USE_BUILDER_FLATPAK: '0'
       FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
@@ -54,12 +49,12 @@ jobs:
           echo "FLATPAK_GPG_PRIVATE_KEY=$RUNNER_TEMP/flatpak-signing-key.asc" >> "$GITHUB_ENV"
 
       - name: Build, sign and bundle
-        run: bash packaging/gitlab/build-release.sh
+        run: bash packaging/ci/build-flatpak-release.sh
 
       - name: Stage the Flatpak files
         run: |
           mkdir -p dist/flatpak
-          cp packaging/linux/SeeMyMac.flatpak packaging/linux/seemymac.flatpakrepo packaging/linux/seemymac.gpg dist/flatpak/
+          cp packaging/linux/SeeMyMac.flatpak dist/flatpak/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -71,8 +66,6 @@ jobs:
     name: Windows installer
     runs-on: windows-2022
     timeout-minutes: 180
-    env:
-      CI_COMMIT_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +73,7 @@ jobs:
       # Installs Inno Setup, NASM, LLVM and the ARM64 C++ tools on the runner first.
       - name: Build the installer
         shell: pwsh
-        run: ./packaging/gitlab/build-windows.ps1
+        run: ./packaging/ci/build-windows.ps1
 
       - name: Stage the installer
         shell: pwsh
@@ -99,7 +92,6 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 120
     env:
-      CI_COMMIT_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
       # Developer ID certificates are imported into a throwaway keychain below.
       SIGN_IDENTITY: 'Developer ID Application: Paul McKinney (2PY624KHXH)'
       INSTALLER_IDENTITY: 'Developer ID Installer: Paul McKinney (2PY624KHXH)'
@@ -180,12 +172,12 @@ jobs:
           ls -l dist
           version="${GITHUB_REF_NAME#v}"
           for f in "dist/SeeMyMac-${version}-setup.exe" "dist/SeeMyMac-${version}-macOS.zip" "dist/SeeMyMac-${version}-macOS.pkg" \
-                   dist/SeeMyMac.flatpak dist/seemymac.flatpakrepo dist/seemymac.gpg; do
+                   dist/SeeMyMac.flatpak; do
             [ -f "$f" ] || { echo "Missing $f"; exit 1; }
           done
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "SeeMyMac ${version}" \
-              --notes-file packaging/gitlab/RELEASE_NOTES.md
+              --notes-file packaging/RELEASE_NOTES.md
           fi

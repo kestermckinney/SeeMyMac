@@ -44,7 +44,7 @@ On Windows and macOS SeeMyMac checks GitHub for a newer release at startup and e
 
 ### Publishing a release
 
-Releases are built by hand and published on GitHub; see `packaging/RELEASING.md`. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
+Pushing a `vX.Y.Z` tag builds every installer on GitHub Actions and attaches it to a GitHub release; see `packaging/RELEASING.md`. For access to a Mac, enable Screen Sharing on that Mac and make sure it is reachable over the network.
 
 ## UI Driver Tool
 
